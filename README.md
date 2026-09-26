@@ -23,7 +23,7 @@ that are too long, dims while paused and hides itself when nothing is playing.
 
 - Pear Desktop (tested with 3.12.0)
 - OBS Studio 30 or newer (custom browser docks need the browser plugin, included in the official builds)
-- Python 3, only to serve the files
+- Python 3, only to serve the files (on Windows: install it from python.org, which adds the `py` launcher)
 
 ## 1. Set up Pear
 
@@ -36,18 +36,31 @@ In Pear, open **Plugins** and enable:
 
 ## 2. Serve the files
 
+Get the files with `git clone https://github.com/<you>/obs-pear-remote`, or *Code › Download ZIP*
+on GitHub and unzip it.
+
+**Linux / macOS**
+
 ```sh
-git clone https://github.com/<you>/obs-pear-remote
 python3 -m http.server 9870 --bind 127.0.0.1 --directory obs-pear-remote
 ```
+
+**Windows**: double-click `extras\start-server.cmd`, or run
+
+```bat
+py -m http.server 9870 --bind 127.0.0.1 --directory C:\path\to\obs-pear-remote
+```
+
+Leave the window open while you stream (closing it stops the server).
 
 Keep the `--bind 127.0.0.1`. The API server can control your playback, so the page that holds its
 token should only be reachable from your own machine. Serving over `http://127.0.0.1` rather than
 opening the files as `file://` also avoids the cross-origin and local-network restrictions of OBS's
 browser.
 
-To start the server at login, use `extras/obs-pear-remote.service` (a systemd user unit; the comment
-at its top explains how).
+To start the server at login: on Linux, use `extras/obs-pear-remote.service` (a systemd user unit;
+the comment at its top explains how). On Windows, put a shortcut to `extras\start-server.cmd` in
+the Startup folder (Win+R, `shell:startup`) and set the shortcut to *Run: Minimized*.
 
 ## 3. Add them to OBS
 
@@ -96,7 +109,7 @@ that field, so for the remote use a theme block.
   listens on a different port (use `?api=`).
 - **"Pear denied obs-pear-remote"**: someone clicked Deny in the authorize prompt. Pear doesn't
   remember a denial: reload the dock to be asked again. Docks have no reload button, but
-  `touch pear-remote.html` triggers the reload-on-change check (or restart OBS).
+  saving `pear-remote.html` again in any editor triggers the reload-on-change check (or restart OBS).
 - **The card never appears**: *Plugins › Amuse* is off, or nothing is playing. Open
   `http://127.0.0.1:9863/query` in a browser: it should return JSON.
 - **The queue is empty or the song is missing right after Pear starts**: Pear only reports the player
