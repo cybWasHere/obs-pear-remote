@@ -15,14 +15,16 @@ the queue. When the dock is wider than it is tall, it switches to a side-by-side
 </p>
 
 **Now Playing** (`now-playing.html`, a browser source) shows cover, title and artist, scrolls titles
-that are too long, dims while paused and hides itself when nothing is playing.
+that are too long, dims while paused and hides itself when nothing is playing. On Linux, if you
+serve the files with `extras/serve.py` instead of `http.server`, the card shows the YouTube video
+playing in your browser ("Now watching", read from MPRIS) whenever Pear is idle or paused.
 
 <img src="screenshots/now-playing.png" width="560" alt="Now Playing card">
 
 ## Requirements
 
 - Pear Desktop (tested with 3.12.0)
-- OBS Studio 30 or newer (custom browser docks need the browser plugin, included in the official builds)
+- OBS Studio 30 or newer (tested on Linux with 32.2.2 and on Windows 11 with 32.2.1); custom browser docks need the browser plugin, which the official builds include
 - Python 3, only to serve the files (on Windows: install it from python.org, which adds the `py` launcher)
 
 ## 1. Set up Pear
@@ -92,6 +94,7 @@ Add options to the URL, for example `pear-remote.html?theme=midnight&amuse=0`.
 | option   | default                                   | what it does |
 |----------|-------------------------------------------|--------------|
 | `amuse`  | `127.0.0.1:9863`, then `localhost:9863`  | Amuse endpoint to poll |
+| `video`  | `/mpris.json`                             | browser YouTube fallback from `extras/serve.py`; `0` turns it off |
 | `theme`  | `purple`                                  | `purple` or `mono` |
 
 ### Themes
@@ -125,6 +128,9 @@ that field, so for the remote use a theme block.
   cache headers). Open the browser source's properties and click *Refresh cache of current page*.
 - **Windows: the server window says "Python 3 was not found, or it does not start"**: `py` and
   `python` can point at a Python that was uninstalled. Install Python from python.org again.
+- **Windows asks to let YouTube Music through the firewall**: that prompt comes from Pear (its Amuse
+  plugin listens on every network interface). *Cancel* is fine: the widgets only talk to
+  `127.0.0.1`, which the firewall doesn't block.
 - **Nothing loads**: check that the server is running (`http://127.0.0.1:9870/pear-remote.html`
   opens in a normal browser too) and that the dock URL starts with `http://`, not `file://`.
 
