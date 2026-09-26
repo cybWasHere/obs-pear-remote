@@ -123,6 +123,8 @@ that field, so for the remote use a theme block.
   search only works when YouTube Music is set to English.
 - **The card ignores your edits to `now-playing.html`**: OBS caches the page (Python's server sends no
   cache headers). Open the browser source's properties and click *Refresh cache of current page*.
+- **Windows: the server window says "Python 3 was not found, or it does not start"**: `py` and
+  `python` can point at a Python that was uninstalled. Install Python from python.org again.
 - **Nothing loads**: check that the server is running (`http://127.0.0.1:9870/pear-remote.html`
   opens in a normal browser too) and that the dock URL starts with `http://`, not `file://`.
 
