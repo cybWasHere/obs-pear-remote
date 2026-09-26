@@ -108,6 +108,8 @@ that field, so for the remote use a theme block.
   report the new repeat, mute or volume state over its websocket, so the dock never learns it.
 - **Search finds nothing**: results are filtered on YouTube Music's "Song" / "Video" labels, so
   search only works when YouTube Music is set to English.
+- **The card ignores your edits to `now-playing.html`**: OBS caches the page (Python's server sends no
+  cache headers). Open the browser source's properties and click *Refresh cache of current page*.
 - **Nothing loads**: check that the server is running (`http://127.0.0.1:9870/pear-remote.html`
   opens in a normal browser too) and that the dock URL starts with `http://`, not `file://`.
 
