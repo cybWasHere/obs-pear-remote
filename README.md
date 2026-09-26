@@ -38,7 +38,7 @@ In Pear, open **Plugins** and enable:
 
 ## 2. Serve the files
 
-Get the files with `git clone https://github.com/<you>/obs-pear-remote`, or *Code › Download ZIP*
+Get the files with `git clone https://github.com/cybWasHere/obs-pear-remote`, or *Code › Download ZIP*
 on GitHub and unzip it.
 
 **Linux / macOS**
