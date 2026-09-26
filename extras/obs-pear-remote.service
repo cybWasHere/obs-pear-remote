@@ -4,7 +4,7 @@
 Description=Serve the OBS Pear remote on 127.0.0.1:9870 (loopback only)
 
 [Service]
-ExecStart=/usr/bin/python3 -m http.server 9870 --bind 127.0.0.1 --directory %h/claude/projects/obs-pear-remote
+ExecStart=/usr/bin/python3 %h/claude/projects/obs-pear-remote/extras/serve.py 9870 --bind 127.0.0.1 --directory %h/claude/projects/obs-pear-remote
 Restart=on-failure
 
 [Install]

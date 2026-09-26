@@ -5,8 +5,11 @@
 <title>Now Playing</title>
 <!-- Now Playing: an OBS browser source card for Pear Desktop (YouTube Music).
      Browser source URL http://127.0.0.1:9870/now-playing.html, 800x300, transparent.
-     Reads Pear's Plugins > Amuse endpoint (read-only, no auth). Hides itself when nothing plays.
+     Reads Pear's Plugins > Amuse endpoint (read-only, no auth). When Pear is idle or paused it
+     shows the YouTube video playing in your browser instead, if extras/serve.py serves the page
+     (its /mpris.json). Hides itself when nothing plays.
      Options: ?amuse=http://127.0.0.1:9863/query (default tries 127.0.0.1 then localhost),
+     &video=<url of mpris.json> (0 turns it off),
      &theme=purple|mono -->
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=JetBrains+Mono:wght@500&display=swap">
 <style>
@@ -94,7 +97,7 @@
   <div class="card" id="card">
     <div class="cover" id="cover"></div>
     <div class="meta">
-      <div class="label"><span class="eq"><i></i><i></i><i></i><i></i></span>Now playing</div>
+      <div class="label"><span class="eq"><i></i><i></i><i></i><i></i></span><span id="label">Now playing</span></div>
       <div class="clip" id="titleClip"><span class="scroll title" id="title"></span></div>
       <div class="clip" id="artistClip"><span class="scroll artist" id="artist"></span></div>
     </div>
@@ -105,7 +108,9 @@ RoughFrame.attach(document.getElementById("card"), 6);
 const P = new URLSearchParams(location.search);
 const API = P.get("amuse") ? [P.get("amuse")] : ["http://127.0.0.1:9863/query", "http://localhost:9863/query"];
 const $ = id => document.getElementById(id);
-let lastId = null;
+const VIDEO = P.get("video") === "0" ? null
+  : P.get("video") || (location.protocol.startsWith("http") ? "/mpris.json" : "http://127.0.0.1:9870/mpris.json");
+let lastId = null, videoRetry = 0;
 let lastErr = null, reported = null;
 
 function fit(clip) {
@@ -130,14 +135,31 @@ async function query() {
   return null;
 }
 
+// the browser's YouTube tab, from extras/serve.py; plain http.server 404s, so back off
+async function video() {
+  if (!VIDEO || Date.now() < videoRetry) return null;
+  try {
+    const r = await fetch(VIDEO, { cache: "no-store" });
+    if (r.ok) { const v = await r.json(); return v.id ? v : null; }
+  } catch (e) {}
+  videoRetry = Date.now() + 30000;
+  return null;
+}
+
 async function tick() {
   const d = await query();
   const card = $("card");
-  const t = d && d.player && d.player.hasSong && d.track && !d.track.isAdvertisement ? d.track : null;
+  const song = d && d.player && d.player.hasSong && d.track && !d.track.isAdvertisement ? d.track : null;
+  let t = song, paused = !!(song && d.player.isPaused), label = "Now playing";
+  if (!song || paused) {
+    const v = await video();
+    if (v) { t = { ...v, id: `yt:${v.id}` }; paused = false; label = "Now watching"; }
+  }
   if (!t) { card.classList.remove("show"); return; }
 
   if (t.id !== lastId) {
     lastId = t.id;
+    $("label").textContent = label;
     $("title").textContent = t.title || "";
     $("artist").textContent = t.author || "";
     $("cover").style.backgroundImage = t.cover ? `url("${t.cover}")` : "";
@@ -146,7 +168,7 @@ async function tick() {
     }
     requestAnimationFrame(() => { fit($("titleClip")); fit($("artistClip")); });
   }
-  card.classList.toggle("paused", !!d.player.isPaused);
+  card.classList.toggle("paused", paused);
   card.classList.add("show");
   if (reported !== "ok") { console.log(`[now-playing] showing: ${t.title}`); reported = "ok"; }
 }

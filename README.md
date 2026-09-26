@@ -47,6 +47,13 @@ on GitHub and unzip it.
 python3 -m http.server 9870 --bind 127.0.0.1 --directory obs-pear-remote
 ```
 
+On Linux you can use `extras/serve.py` instead: the same server plus `/mpris.json`, which lets the
+card fall back to the YouTube video playing in your browser.
+
+```sh
+python3 obs-pear-remote/extras/serve.py 9870 --bind 127.0.0.1 --directory obs-pear-remote
+```
+
 **Windows**: double-click `extras\start-server.cmd`, or run
 
 ```bat
@@ -60,8 +67,8 @@ token should only be reachable from your own machine. Serving over `http://127.0
 opening the files as `file://` also avoids the cross-origin and local-network restrictions of OBS's
 browser.
 
-To start the server at login: on Linux, use `extras/obs-pear-remote.service` (a systemd user unit;
-the comment at its top explains how). On Windows, put a shortcut to `extras\start-server.cmd` in
+To start the server at login: on Linux, use `extras/obs-pear-remote.service` (a systemd user unit
+that runs `serve.py`; the comment at its top explains how). On Windows, put a shortcut to `extras\start-server.cmd` in
 the Startup folder (Win+R, `shell:startup`) and set the shortcut to *Run: Minimized*.
 
 ## 3. Add them to OBS
