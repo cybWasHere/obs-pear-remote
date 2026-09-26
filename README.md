@@ -101,6 +101,13 @@ that field, so for the remote use a theme block.
   `http://127.0.0.1:9863/query` in a browser: it should return JSON.
 - **The queue is empty or the song is missing right after Pear starts**: Pear only reports the player
   state after its first player event. Press play/pause once.
+- **"+ queue" does nothing**: on an endless radio/autoplay queue, Pear 3.12.0 accepts "add to the
+  end" but the song never shows up (the same happens when you call Pear's API directly). Use
+  "▶ next" instead, which inserts right after the current song.
+- **Volume, mute or repeat don't update in the dock when you change them in Pear**: Pear doesn't
+  send those changes over its websocket, so the dock only knows what you set from the dock.
+- **Search finds nothing**: results are filtered on YouTube Music's "Song" / "Video" labels, so
+  search only works when YouTube Music is set to English.
 - **Nothing loads**: check that the server is running (`http://127.0.0.1:9870/pear-remote.html`
   opens in a normal browser too) and that the dock URL starts with `http://`, not `file://`.
 

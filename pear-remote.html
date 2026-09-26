@@ -302,7 +302,13 @@ function parseSearch(data) {
     if (r) {
       const cols = r.flexColumns || [];
       const col = i => cols[i] ? runs(cols[i].musicResponsiveListItemFlexColumnRenderer.text) : "";
-      const vid = r.playlistItemData && r.playlistItemData.videoId;
+      // YouTube Music dropped playlistItemData from search rows in September 2026; the id now
+      // sits on the row's (or its play button's) watch endpoint
+      const watch = e => e && e.watchEndpoint && e.watchEndpoint.videoId;
+      const play = r.overlay && r.overlay.musicItemThumbnailOverlayRenderer
+        && r.overlay.musicItemThumbnailOverlayRenderer.content.musicPlayButtonRenderer;
+      const vid = (r.playlistItemData && r.playlistItemData.videoId) || watch(r.navigationEndpoint)
+        || watch(play && play.playNavigationEndpoint);
       const sub = col(1);
       if (vid && /^(Song|Video)/.test(sub)) out.push({ videoId: vid, title: col(0), sub,
         thumb: thumbOf(r.thumbnail && r.thumbnail.musicThumbnailRenderer && r.thumbnail.musicThumbnailRenderer.thumbnail) });
