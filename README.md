@@ -104,8 +104,8 @@ that field, so for the remote use a theme block.
 - **"+ queue" does nothing**: on an endless radio/autoplay queue, Pear 3.12.0 accepts "add to the
   end" but the song never shows up (the same happens when you call Pear's API directly). Use
   "▶ next" instead, which inserts right after the current song.
-- **Volume, mute or repeat don't update in the dock when you change them in Pear**: Pear doesn't
-  send those changes over its websocket, so the dock only knows what you set from the dock.
+- **The repeat and mute buttons don't light up**: the commands work, but Pear 3.12.0 doesn't
+  report the new repeat, mute or volume state over its websocket, so the dock never learns it.
 - **Search finds nothing**: results are filtered on YouTube Music's "Song" / "Video" labels, so
   search only works when YouTube Music is set to English.
 - **Nothing loads**: check that the server is running (`http://127.0.0.1:9870/pear-remote.html`
