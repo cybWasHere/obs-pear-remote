@@ -1,0 +1,412 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pear Remote</title>
+<!-- OBS custom browser dock: Docks > Custom Browser Docks, URL http://127.0.0.1:9870/pear-remote.html
+     Talks to Pear Desktop's API Server plugin (127.0.0.1:26538, "Authorize at first request";
+     client id obs-pear-remote is already allowed). Live state comes over its websocket.
+     Colours: Halloy's Ferra palette, same as the OBS theme. -->
+<style>
+  :root {
+    --bg: #242226; --surface: #2b292d; --sunken: #201e21; --line: #3e3c41; --line2: #4f474d;
+    --text: #fecdb2; --muted: #ab8a79; --dim: #6f5d63;
+    --pink: #f6b6c9; --coral: #ffa07a; --sage: #b1b695; --red: #e06b75; --blue: #7aaedc;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
+  body { font: 12px/1.35 "Hack", "Noto Sans Mono", monospace; display: flex; flex-direction: column; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+  svg { width: 16px; height: 16px; fill: currentColor; display: block; }
+
+  #player { flex: none; }
+  #side { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+  #now { display: flex; gap: 10px; padding: 10px 10px 6px; align-items: center; }
+  #cover { width: 64px; height: 64px; border-radius: 6px; object-fit: cover; background: var(--sunken);
+           border: 1px solid var(--line); flex: none; }
+  #meta { min-width: 0; flex: 1; }
+  #title { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+  #artist { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status { color: var(--dim); font-size: 10px; margin-top: 2px; }
+  #status.bad { color: var(--red); }
+
+  #seek { padding: 0 10px; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 10px; }
+  #bar { flex: 1; height: 14px; display: flex; align-items: center; cursor: pointer; }
+  #track { width: 100%; height: 4px; background: var(--line); border-radius: 2px; position: relative; }
+  #fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--pink); border-radius: 2px; }
+  #bar:hover #track { height: 6px; }
+
+  .row { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 10px; }
+  .btn { width: 30px; height: 30px; border-radius: 6px; display: grid; place-items: center; color: var(--text); }
+  .btn:hover { background: var(--surface); }
+  .btn:active { background: var(--sunken); }
+  .btn.big { width: 40px; height: 40px; border-radius: 20px; background: var(--pink); color: var(--bg); }
+  .btn.big:hover { background: #ffc9d7; }
+  .btn.big svg { width: 20px; height: 20px; }
+  .btn.on { color: var(--pink); }
+  .btn.like.on { color: var(--coral); }
+  .btn.dislike.on { color: var(--red); }
+  .btn .tag { position: absolute; font-size: 8px; font-weight: 700; margin: 12px 0 0 14px; }
+  .btn { position: relative; }
+  #vol { flex: 1; max-width: 140px; accent-color: var(--pink); }
+
+  /* slim toolbar: small icon tabs, the search box inline */
+  #tabs { display: flex; align-items: center; gap: 2px; height: 30px; flex: none; padding: 0 6px;
+          border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--sunken); }
+  #tabs .tab { width: 26px; height: 22px; border-radius: 4px; display: grid; place-items: center; color: var(--dim); }
+  #tabs .tab svg { width: 14px; height: 14px; }
+  #tabs .tab:hover { color: var(--text); background: var(--surface); }
+  #tabs .tab.on { color: var(--pink); background: var(--surface); }
+  #tabLabel { margin-left: auto; color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; }
+
+  #search { display: none; flex: 1; margin-left: 4px; }
+  #search.on { display: flex; }
+  #q { flex: 1; min-width: 0; font: inherit; font-size: 11px; color: var(--text); background: var(--bg);
+       border: 1px solid var(--line2); border-radius: 4px; padding: 2px 6px; height: 22px; outline: none; }
+  #q:focus { border-color: var(--pink); }
+
+  #list { flex: 1; overflow-y: auto; padding: 4px 0; position: relative; }
+  #list::-webkit-scrollbar { width: 8px; }
+  #list::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 4px; }
+  .item { display: flex; gap: 8px; align-items: center; padding: 4px 8px; cursor: pointer; }
+  .item:hover { background: var(--surface); }
+  .item.cur { background: #453d41; }
+  .item.cur .t { color: var(--pink); }
+  .item img { width: 36px; height: 36px; border-radius: 4px; object-fit: cover; flex: none; background: var(--sunken); }
+  .item .txt { min-width: 0; flex: 1; }
+  .item .t, .item .s { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .s { color: var(--muted); font-size: 11px; }
+  .item .acts { display: none; gap: 2px; }
+  .item:hover .acts { display: flex; }
+  .item .acts button { padding: 3px 5px; border-radius: 4px; color: var(--muted); font-size: 11px; }
+  .item .acts button:hover { background: var(--sunken); color: var(--text); }
+  .empty { color: var(--dim); text-align: center; padding: 20px; }
+  /* wide dock (wider than tall): player on the left, queue / search filling the right */
+  @media (min-aspect-ratio: 4/3) and (min-width: 560px) {
+    body { flex-direction: row; }
+    #player { width: 340px; display: flex; flex-direction: column; justify-content: center;
+              border-right: 1px solid var(--line); background: var(--surface); }
+    #cover { width: 84px; height: 84px; }
+  }
+  /* very short dock: tighten the player */
+  @media (max-height: 230px) {
+    #now { padding: 6px 10px 2px; }
+    #cover { width: 52px; height: 52px; }
+    .row { padding: 3px 10px; }
+    #status { display: none; }
+  }
+
+</style>
+</head>
+<body>
+
+<div id="player">
+<div id="now">
+  <img id="cover" alt="">
+  <div id="meta">
+    <div id="title">—</div>
+    <div id="artist"></div>
+    <div id="status">connecting…</div>
+  </div>
+</div>
+
+<div id="seek"><span id="pos">0:00</span><div id="bar"><div id="track"><div id="fill"></div></div></div><span id="dur">0:00</span></div>
+
+<div class="row">
+  <button class="btn" id="shuffle" title="Shuffle"><svg viewBox="0 0 24 24"><path d="M10.6 9.2 5.4 4 4 5.4l5.2 5.2 1.4-1.4ZM14.5 4l2 2L4 18.6 5.4 20 18 7.5l2 2V4h-5.5Zm.3 9.4-1.4 1.4 3.1 3.1-2 2.1H20v-5.5l-2 2-3.2-3.1Z"/></svg></button>
+  <button class="btn" id="prev" title="Previous"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg></button>
+  <button class="btn big" id="play" title="Play / pause"><svg viewBox="0 0 24 24"><path id="playIcon" d="M8 5v14l11-7z"/></svg></button>
+  <button class="btn" id="next" title="Next"><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
+  <button class="btn" id="repeat" title="Repeat"><svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7Zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4Z"/></svg><span class="tag" id="repeatTag"></span></button>
+</div>
+
+<div class="row">
+  <button class="btn dislike" id="dislike" title="Dislike"><svg viewBox="0 0 24 24"><path d="M15 3H6c-.8 0-1.5.5-1.8 1.2l-3 7.1c-.1.2-.2.5-.2.7v2c0 1.1.9 2 2 2h6.3l-1 4.6v.3c0 .4.2.8.4 1.1l1.1 1L16.4 16c.4-.4.6-.9.6-1.4V5c0-1.1-.9-2-2-2Zm4 0v12h4V3h-4Z"/></svg></button>
+  <button class="btn like" id="like" title="Like"><svg viewBox="0 0 24 24"><path d="M1 21h4V9H1v12Zm22-11c0-1.1-.9-2-2-2h-6.3l1-4.6v-.3c0-.4-.2-.8-.4-1.1L14.2 1 7.6 7.6C7.2 8 7 8.5 7 9v10c0 1.1.9 2 2 2h9c.8 0 1.5-.5 1.8-1.2l3-7.1c.1-.2.2-.5.2-.7v-2Z"/></svg></button>
+  <button class="btn" id="mute" title="Mute"><svg viewBox="0 0 24 24"><path id="muteIcon" d="M3 9v6h4l5 5V4L7 9H3Zm13.5 3A4.5 4.5 0 0 0 14 8v8c1.5-.7 2.5-2.2 2.5-4Z"/></svg></button>
+  <input type="range" id="vol" min="0" max="100" value="50" title="Volume">
+</div>
+</div>
+
+<div id="side">
+<div id="tabs">
+  <button id="tabQueue" class="tab on" title="Queue"><svg viewBox="0 0 24 24"><path d="M3 6h13v2H3zm0 5h13v2H3zm0 5h9v2H3zm15-1.2V8h4v2h-2v7a3 3 0 1 1-2-2.2Z"/></svg></button>
+  <button id="tabSearch" class="tab" title="Search"><svg viewBox="0 0 24 24"><path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5Zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9Z"/></svg></button>
+  <div id="search"><input id="q" placeholder="search, Enter…" autocomplete="off"></div>
+  <span id="tabLabel">queue</span>
+</div>
+<div id="list"></div>
+</div>
+
+<script>
+const API = "http://127.0.0.1:26538";
+const CLIENT = "obs-pear-remote";
+const AMUSE = "http://127.0.0.1:9863/query";   // read-only fallback for the current song
+const $ = id => document.getElementById(id);
+
+let token = null;
+const st = { song: null, playing: false, position: 0, posAt: 0, volume: null, muted: false,
+             repeat: "NONE", shuffle: false, like: null, queue: [], tab: "queue", results: [] };
+
+// ---- api ----
+async function auth() {
+  const r = await fetch(`${API}/auth/${CLIENT}`, { method: "POST" });
+  if (!r.ok) throw new Error("auth " + r.status);
+  token = (await r.json()).accessToken;
+}
+
+async function api(path, { method = "GET", body } = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (!token) await auth();
+    const r = await fetch(`${API}/api/v1/${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (r.status === 401) { token = null; continue; }
+    if (!r.ok) throw new Error(`${path} ${r.status}`);
+    const text = await r.text();
+    return text ? JSON.parse(text) : null;
+  }
+  throw new Error("unauthorized");
+}
+
+function status(msg, bad) { $("status").textContent = msg; $("status").classList.toggle("bad", !!bad); }
+const act = (path, body, method = "POST") => api(path, { method, body }).catch(e => status(e.message, true));
+
+// ---- rendering ----
+const fmt = s => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+const livePos = () => st.position + (st.playing ? (performance.now() - st.posAt) / 1000 : 0);
+
+function renderSong() {
+  const s = st.song;
+  $("title").textContent = s ? s.title : "—";
+  $("artist").textContent = s ? [s.artist, s.album].filter(Boolean).join(" · ") : "";
+  if (s && s.imageSrc && $("cover").src !== s.imageSrc) $("cover").src = s.imageSrc;
+  $("dur").textContent = fmt(s && s.songDuration);
+}
+
+function renderControls() {
+  $("playIcon").setAttribute("d", st.playing ? "M6 5h4v14H6zm8 0h4v14h-4z" : "M8 5v14l11-7z");
+  $("shuffle").classList.toggle("on", st.shuffle);
+  $("repeat").classList.toggle("on", st.repeat !== "NONE");
+  $("repeatTag").textContent = st.repeat === "ONE" ? "1" : "";
+  $("like").classList.toggle("on", st.like === "LIKE");
+  $("dislike").classList.toggle("on", st.like === "DISLIKE");
+  $("mute").classList.toggle("on", st.muted);
+  $("muteIcon").setAttribute("d", st.muted
+    ? "M16.5 12A4.5 4.5 0 0 0 14 8v2.2l2.5 2.4V12ZM19 12c0 .9-.2 1.8-.5 2.6l1.5 1.5A8.8 8.8 0 0 0 21 12c0-4.3-3-7.9-7-8.8v2.1c2.9.9 5 3.5 5 6.7ZM4.3 3 3 4.3 7.7 9H3v6h4l5 5v-6.7l4.3 4.2c-.7.5-1.4.9-2.3 1.2v2A9 9 0 0 0 17.7 19l2 2 1.3-1.3-9-9L4.3 3ZM12 4 9.9 6.1 12 8.2V4Z"
+    : "M3 9v6h4l5 5V4L7 9H3Zm13.5 3A4.5 4.5 0 0 0 14 8v8c1.5-.7 2.5-2.2 2.5-4Z");
+  if (st.volume != null && document.activeElement !== $("vol")) $("vol").value = st.volume;
+}
+
+function tick() {
+  const d = st.song ? st.song.songDuration : 0;
+  const p = Math.min(livePos(), d || Infinity);
+  $("pos").textContent = fmt(p);
+  $("fill").style.width = d ? `${(p / d) * 100}%` : "0";
+  requestAnimationFrame(tick);
+}
+
+function row(img, title, sub, cls, onClick, acts) {
+  const el = document.createElement("div");
+  el.className = "item" + (cls ? " " + cls : "");
+  el.innerHTML = `<img loading="lazy"><div class="txt"><div class="t"></div><div class="s"></div></div><div class="acts"></div>`;
+  el.querySelector("img").src = img || "";
+  el.querySelector(".t").textContent = title;
+  el.querySelector(".s").textContent = sub;
+  if (onClick) el.addEventListener("click", onClick);
+  for (const [label, tip, fn] of acts || []) {
+    const b = document.createElement("button");
+    b.textContent = label; b.title = tip;
+    b.addEventListener("click", e => { e.stopPropagation(); fn(); });
+    el.querySelector(".acts").append(b);
+  }
+  return el;
+}
+
+function renderList() {
+  const list = $("list");
+  list.textContent = "";
+  if (st.tab === "queue") {
+    if (!st.queue.length) { list.innerHTML = `<div class="empty">queue is empty</div>`; return; }
+    st.queue.forEach((q, i) => list.append(row(q.thumb, q.title, `${q.by}  ${q.len}`, q.cur ? "cur" : "",
+      () => act("queue", { index: i }, "PATCH").then(() => setTimeout(loadQueue, 600)),
+      [["✕", "remove from queue", () => act(`queue/${i}`, null, "DELETE").then(loadQueue)]])));
+    // centre the current song by scrolling the list only; scrollIntoView would also scroll
+    // the page itself and make the whole dock jump
+    const cur = list.querySelector(".cur");
+    if (cur) list.scrollTop = cur.offsetTop - (list.clientHeight - cur.offsetHeight) / 2;
+  } else {
+    if (!st.results.length) { list.innerHTML = `<div class="empty">type something and press Enter</div>`; return; }
+    for (const r of st.results) list.append(row(r.thumb, r.title, r.sub, "",
+      () => add(r, "INSERT_AFTER_CURRENT_VIDEO", true),
+      [["▶ next", "play after the current song", () => add(r, "INSERT_AFTER_CURRENT_VIDEO")],
+       ["+ queue", "add to the end of the queue", () => add(r, "INSERT_AT_END")]]));
+  }
+}
+
+async function add(r, where, andPlay) {
+  await act("queue", { videoId: r.videoId, insertPosition: where });
+  status(`queued: ${r.title}`);
+  if (andPlay) setTimeout(() => act("next"), 400);   // click = play it now
+  setTimeout(loadQueue, 700);
+}
+
+// ---- youtube music data ----
+const runs = r => (r && r.runs || []).map(x => x.text).join("");
+const thumbOf = t => { const a = t && t.thumbnails; return a && a.length ? a[0].url : ""; };
+
+function parseQueue(data) {
+  return (data && data.items || []).map(it => {
+    const r = it.playlistPanelVideoRenderer
+      || (it.playlistPanelVideoWrapperRenderer && it.playlistPanelVideoWrapperRenderer.primaryRenderer.playlistPanelVideoRenderer);
+    if (!r) return null;
+    return { title: runs(r.title), by: runs(r.shortBylineText), len: runs(r.lengthText), videoId: r.videoId,
+             thumb: thumbOf(r.thumbnail), cur: !!r.selected };
+  }).filter(Boolean);
+}
+
+function parseSearch(data) {
+  const out = [], seen = new Set();
+  const walk = o => {
+    if (Array.isArray(o)) { o.forEach(walk); return; }
+    if (!o || typeof o !== "object") return;
+    const card = o.musicCardShelfRenderer;
+    if (card) {
+      const t = card.title && card.title.runs && card.title.runs[0];
+      const vid = t && t.navigationEndpoint && t.navigationEndpoint.watchEndpoint && t.navigationEndpoint.watchEndpoint.videoId;
+      const sub = runs(card.subtitle);
+      if (vid && /^(Song|Video)/.test(sub)) out.push({ videoId: vid, title: runs(card.title), sub,
+        thumb: thumbOf(card.thumbnail && card.thumbnail.musicThumbnailRenderer && card.thumbnail.musicThumbnailRenderer.thumbnail) });
+    }
+    const r = o.musicResponsiveListItemRenderer;
+    if (r) {
+      const cols = r.flexColumns || [];
+      const col = i => cols[i] ? runs(cols[i].musicResponsiveListItemFlexColumnRenderer.text) : "";
+      const vid = r.playlistItemData && r.playlistItemData.videoId;
+      const sub = col(1);
+      if (vid && /^(Song|Video)/.test(sub)) out.push({ videoId: vid, title: col(0), sub,
+        thumb: thumbOf(r.thumbnail && r.thumbnail.musicThumbnailRenderer && r.thumbnail.musicThumbnailRenderer.thumbnail) });
+    }
+    for (const k in o) walk(o[k]);
+  };
+  walk(data && data.contents);
+  return out.filter(r => !seen.has(r.videoId) && seen.add(r.videoId));
+}
+
+async function loadQueue() {
+  try { st.queue = parseQueue(await api("queue")); if (st.tab === "queue") renderList(); }
+  catch (e) { status(e.message, true); }
+}
+async function loadLike() {
+  try { st.like = (await api("like-state")).state; renderControls(); } catch { /* not ready yet */ }
+}
+
+// ---- live state ----
+function apply(m) {
+  // Pear's first PLAYER_INFO has no song and reports "stopped at 0" until it has seen a player
+  // event; keep what the Amuse fallback knows instead of trusting that
+  if (m.type === "PLAYER_INFO" && !m.song) { delete m.isPlaying; delete m.position; }
+  if ("song" in m && m.song) {
+    const changed = !st.song || st.song.videoId !== m.song.videoId;
+    st.song = m.song; renderSong();
+    if (changed) { loadLike(); loadQueue(); }
+  }
+  if ("isPlaying" in m) st.playing = m.isPlaying;
+  if ("position" in m) { st.position = m.position; st.posAt = performance.now(); }
+  if ("volume" in m && m.volume != null) st.volume = m.volume;
+  if ("muted" in m) st.muted = m.muted;
+  if ("repeat" in m && m.repeat) st.repeat = m.repeat;
+  if ("shuffle" in m) st.shuffle = m.shuffle;
+  renderControls();
+}
+
+let backoff = 1000;
+async function connect() {
+  try { await auth(); }
+  catch { status("Pear API server not reachable (Plugins › API Server)", true); return setTimeout(connect, backoff = Math.min(backoff * 2, 15000)); }
+  const ws = new WebSocket(`${API.replace("http", "ws")}/api/v1/ws?token=${encodeURIComponent(token)}`);
+  ws.onopen = () => { backoff = 1000; status("connected"); loadQueue(); loadLike(); };
+  ws.onmessage = ev => { try { apply(JSON.parse(ev.data)); } catch { } };
+  ws.onclose = () => { status("reconnecting…", true); setTimeout(connect, backoff = Math.min(backoff * 2, 15000)); };
+}
+
+// Pear only reports the song over the socket after its first player event, so until then
+// borrow title/cover/position from the read-only Amuse endpoint
+async function amuseFallback() {
+  if (st.song && !st.song.fromAmuse) return;
+  try {
+    const d = await (await fetch(AMUSE, { cache: "no-store" })).json();
+    if (d.track && d.track.title) {
+      const changed = !st.song || st.song.videoId !== d.track.id;
+      st.song = { title: d.track.title, artist: d.track.author, imageSrc: d.track.cover, songDuration: d.track.duration,
+                  videoId: d.track.id };
+      st.playing = !d.player.isPaused;
+      st.position = d.player.seekbarCurrentPosition || 0; st.posAt = performance.now();
+      st.song.fromAmuse = true;
+      renderSong(); renderControls();
+      if (changed) { loadLike(); loadQueue(); }
+    }
+  } catch { }
+}
+
+// ---- controls ----
+$("play").onclick = () => { st.playing = !st.playing; renderControls(); act("toggle-play"); };
+$("next").onclick = () => act("next");
+$("prev").onclick = () => act("previous");
+$("like").onclick = () => act("like").then(() => setTimeout(loadLike, 300));
+$("dislike").onclick = () => act("dislike").then(() => setTimeout(loadLike, 300));
+$("shuffle").onclick = () => act("shuffle").then(() => setTimeout(loadQueue, 800));
+$("repeat").onclick = () => act("switch-repeat", { iteration: 1 });
+$("mute").onclick = () => act("toggle-mute");
+$("vol").oninput = e => { st.volume = +e.target.value; act("volume", { volume: st.volume }); };
+$("bar").onclick = e => {
+  if (!st.song || !st.song.songDuration) return;
+  const r = $("track").getBoundingClientRect();
+  const s = Math.round(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * st.song.songDuration);
+  st.position = s; st.posAt = performance.now();
+  act("seek-to", { seconds: s });
+};
+
+function setTab(t) {
+  st.tab = t;
+  $("tabQueue").classList.toggle("on", t === "queue");
+  $("tabSearch").classList.toggle("on", t === "search");
+  $("search").classList.toggle("on", t === "search");
+  $("tabLabel").textContent = t === "search" ? "" : t;
+  if (t === "search") $("q").focus(); else loadQueue();
+  renderList();
+}
+$("tabQueue").onclick = () => setTab("queue");
+$("tabSearch").onclick = () => setTab("search");
+$("q").onkeydown = async e => {
+  if (e.key !== "Enter" || !e.target.value.trim()) return;
+  status("searching…");
+  try { st.results = parseSearch(await api("search", { method: "POST", body: { query: e.target.value.trim() } }));
+        status(`${st.results.length} results`); }
+  catch (err) { status(err.message, true); }
+  renderList();
+};
+
+// reload by itself when this file changes on disk (OBS docks have no reload menu)
+let stamp = null;
+setInterval(async () => {
+  try {
+    const r = await fetch(location.pathname, { method: "HEAD", cache: "no-store" });
+    const m = r.headers.get("Last-Modified");
+    if (stamp && m && m !== stamp) location.reload();
+    stamp = m || stamp;
+  } catch { }
+}, 4000);
+
+renderList();
+connect();
+amuseFallback();
+setInterval(amuseFallback, 3000);
+setInterval(loadQueue, 30000);
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
