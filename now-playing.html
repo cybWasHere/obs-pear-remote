@@ -14,7 +14,7 @@
      variables in the browser source's Custom CSS field */
   :root, :root[data-theme="purple"] {
     --panel: rgba(18, 7, 34, 0.72);
-    --edge: rgba(201, 160, 255, 0.35);
+    --edge: rgba(226, 204, 255, 0.62);
     --accent: #c9a0ff;
     --accent-deep: #6b2eb3;
     --cover-end: #1d0b36;
@@ -26,7 +26,7 @@
   }
   :root[data-theme="mono"] {
     --panel: rgba(12, 12, 14, 0.72);
-    --edge: rgba(255, 255, 255, 0.22);
+    --edge: rgba(255, 255, 255, 0.5);
     --accent: #e6e6e6;
     --accent-deep: #4a4a50;
     --cover-end: #141416;
@@ -41,19 +41,23 @@
 
   .card {
     display: flex; align-items: center; gap: 22px;
-    width: 640px; padding: 18px 26px 18px 18px;
-    background: var(--panel);
-    border: 1px solid var(--edge);
-    border-radius: 18px;
-    box-shadow: 0 0 40px var(--glow), inset 0 0 30px var(--glow-inset);
+    position: relative; isolation: isolate;
+    width: 640px; padding: 19px 27px 19px 19px;   /* +1px where the CSS border was */
     opacity: 0; transform: translateX(-40px);
     transition: opacity .6s ease, transform .6s cubic-bezier(.2, .9, .3, 1.2);
   }
+  /* panel + edge: a slightly off-square quad drawn by rough-frame.js */
+  .frame {
+    position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1;
+    overflow: visible; pointer-events: none;
+    filter: drop-shadow(0 0 20px var(--glow)) drop-shadow(0 0 3px var(--glow-inset));
+  }
+  .frame polygon { fill: var(--panel); stroke: var(--edge); stroke-width: 1.5; stroke-linejoin: miter; }
   .card.show { opacity: 1; transform: none; }
   .card.paused { opacity: .45; }
 
   .cover {
-    position: relative; flex: none; width: 112px; height: 112px; border-radius: 12px;
+    position: relative; flex: none; width: 112px; height: 112px; border-radius: 2px;
     background: linear-gradient(135deg, var(--accent-deep), var(--cover-end)) center / cover;
     box-shadow: 0 0 0 1px var(--edge), 0 8px 24px rgba(0, 0, 0, .5);
     transition: background-image .4s;
@@ -95,7 +99,9 @@
       <div class="clip" id="artistClip"><span class="scroll artist" id="artist"></span></div>
     </div>
   </div>
+<script src="rough-frame.js"></script>
 <script>
+RoughFrame.attach(document.getElementById("card"), 6);
 const P = new URLSearchParams(location.search);
 const API = P.get("amuse") ? [P.get("amuse")] : ["http://127.0.0.1:9863/query", "http://localhost:9863/query"];
 const $ = id => document.getElementById(id);
