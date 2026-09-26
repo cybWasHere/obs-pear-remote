@@ -165,7 +165,10 @@ const st = { song: null, playing: false, position: 0, posAt: 0, volume: null, mu
 
 // ---- api ----
 async function auth() {
-  const r = await fetch(`${API}/auth/${CLIENT}`, { method: "POST" });
+  const r = await fetch(`${API}/auth/${encodeURIComponent(CLIENT)}`, { method: "POST" });
+  // 403 = someone clicked Deny in Pear's authorize prompt; Pear doesn't remember that, so
+  // retrying would pop the prompt again and again
+  if (r.status === 403) throw Object.assign(new Error(`Pear denied "${CLIENT}"; reload this dock to be asked again`), { denied: true });
   if (!r.ok) throw new Error("auth " + r.status);
   token = (await r.json()).accessToken;
 }
@@ -340,7 +343,13 @@ function apply(m) {
 let backoff = 1000;
 async function connect() {
   try { await auth(); }
-  catch { status("Pear API server not reachable (Plugins › API Server)", true); return setTimeout(connect, backoff = Math.min(backoff * 2, 15000)); }
+  catch (e) {
+    if (e.denied) return status(e.message, true);
+    status(e instanceof TypeError   // fetch itself failed: nothing listening
+      ? `Pear API server not reachable at ${API}: enable Plugins › API Server in Pear; on first connect Pear asks you to authorize "${CLIENT}"`
+      : e.message, true);
+    return setTimeout(connect, backoff = Math.min(backoff * 2, 15000));
+  }
   const ws = new WebSocket(`${API.replace("http", "ws")}/api/v1/ws?token=${encodeURIComponent(token)}`);
   ws.onopen = () => { backoff = 1000; status("connected"); loadQueue(); loadLike(); };
   ws.onmessage = ev => { try { apply(JSON.parse(ev.data)); } catch { } };
