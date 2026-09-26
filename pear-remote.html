@@ -3,10 +3,14 @@
 <head>
 <meta charset="utf-8">
 <title>Pear Remote</title>
-<!-- OBS custom browser dock: Docks > Custom Browser Docks, URL http://127.0.0.1:9870/pear-remote.html
-     Talks to Pear Desktop's API Server plugin (127.0.0.1:26538, "Authorize at first request";
-     client id obs-pear-remote is already allowed). Live state comes over its websocket.
-     Colours: Halloy's Ferra palette, same as the OBS theme. -->
+<!-- Pear Remote: an OBS custom browser dock for Pear Desktop (YouTube Music).
+     Serve this folder on loopback (python3 -m http.server 9870 --bind 127.0.0.1) and add
+     Docks > Custom Browser Docks, URL http://127.0.0.1:9870/pear-remote.html
+     Needs Pear's Plugins > API Server (live state over its websocket); Plugins > Amuse is an
+     optional read-only fallback until Pear reports its first song.
+     Options: ?api=http://127.0.0.1:26538 (API Server address), &client=obs-pear-remote (name
+     shown in Pear's authorize prompt), &amuse=http://127.0.0.1:9863/query (0 = off),
+     &theme=ferra|midnight, &reload=0 (don't reload when this file changes on disk) -->
 <style>
   :root {
     --bg: #242226; --surface: #2b292d; --sunken: #201e21; --line: #3e3c41; --line2: #4f474d;
@@ -140,9 +144,10 @@
 </div>
 
 <script>
-const API = "http://127.0.0.1:26538";
-const CLIENT = "obs-pear-remote";
-const AMUSE = "http://127.0.0.1:9863/query";   // read-only fallback for the current song
+const P = new URLSearchParams(location.search);
+const API = (P.get("api") || "http://127.0.0.1:26538").replace(/\/+$/, "");
+const CLIENT = P.get("client") || "obs-pear-remote";
+const AMUSE = P.get("amuse") === "0" ? null : P.get("amuse") || "http://127.0.0.1:9863/query";   // read-only fallback for the current song
 const $ = id => document.getElementById(id);
 
 let token = null;
@@ -336,7 +341,7 @@ async function connect() {
 // Pear only reports the song over the socket after its first player event, so until then
 // borrow title/cover/position from the read-only Amuse endpoint
 async function amuseFallback() {
-  if (st.song && !st.song.fromAmuse) return;
+  if (!AMUSE || (st.song && !st.song.fromAmuse)) return;
   try {
     const d = await (await fetch(AMUSE, { cache: "no-store" })).json();
     if (d.track && d.track.title) {
@@ -392,7 +397,7 @@ $("q").onkeydown = async e => {
 
 // reload by itself when this file changes on disk (OBS docks have no reload menu)
 let stamp = null;
-setInterval(async () => {
+if (P.get("reload") !== "0") setInterval(async () => {
   try {
     const r = await fetch(location.pathname, { method: "HEAD", cache: "no-store" });
     const m = r.headers.get("Last-Modified");
@@ -403,8 +408,7 @@ setInterval(async () => {
 
 renderList();
 connect();
-amuseFallback();
-setInterval(amuseFallback, 3000);
+if (AMUSE) { amuseFallback(); setInterval(amuseFallback, 3000); }
 setInterval(loadQueue, 30000);
 requestAnimationFrame(tick);
 </script>

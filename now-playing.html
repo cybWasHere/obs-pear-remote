@@ -3,7 +3,11 @@
 <head>
 <meta charset="utf-8">
 <title>Now Playing</title>
-<!-- OBS browser source (local file). Reads Pear Desktop's local API, no account, no ads. -->
+<!-- Now Playing: an OBS browser source card for Pear Desktop (YouTube Music).
+     Browser source URL http://127.0.0.1:9870/now-playing.html, 800x300, transparent.
+     Reads Pear's Plugins > Amuse endpoint (read-only, no auth). Hides itself when nothing plays.
+     Options: ?amuse=http://127.0.0.1:9863/query (default tries 127.0.0.1 then localhost),
+     &theme=purple|mono -->
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=JetBrains+Mono:wght@500&display=swap">
 <style>
   :root {
@@ -73,7 +77,8 @@
     </div>
   </div>
 <script>
-const API = ["http://127.0.0.1:9863/query", "http://localhost:9863/query"];
+const P = new URLSearchParams(location.search);
+const API = P.get("amuse") ? [P.get("amuse")] : ["http://127.0.0.1:9863/query", "http://localhost:9863/query"];
 const $ = id => document.getElementById(id);
 let lastId = null;
 let lastErr = null, reported = null;
