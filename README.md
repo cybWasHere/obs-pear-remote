@@ -120,7 +120,10 @@ Pear, and nothing new listens on the network. Then:
 - `POST /api/v1/queue` accepts a playlist id in `videoId` (a mix is about 200 songs), and adds
   songs while a mix plays;
 - `POST /api/v1/search` with the query `browse:FEmusic_mixed_for_you` returns your shelf, which
-  the remote's Mixes tab (the grid icon) lists.
+  the remote's Mixes tab (the grid icon) lists;
+- `POST /api/v1/queue` with `play:<playlistId>:<first videoId>:<params>` starts a mix at once, like
+  its play button in YouTube Music. The Mixes tab fetches each mix's first song (search
+  `next:<playlistId>:<params>`) while your pointer is on the row, so a click plays in about 0.7 s.
 
 <details>
 <summary><b>Installing it (Linux, pear-desktop-bin)</b></summary>

@@ -263,10 +263,13 @@ function renderList() {
     if (cur) list.scrollTop = cur.offsetTop - (list.clientHeight - cur.offsetHeight) / 2;
   } else if (st.tab === "mixes") {
     if (!st.mixes.length) { list.innerHTML = `<div class="empty"></div>`; list.firstChild.textContent = st.mixesNote; return; }
-    for (const m of st.mixes) list.append(row(m.thumb, m.title, m.sub, "",
-      () => addMix(m, "INSERT_AFTER_CURRENT_VIDEO", true),
-      [["▶ next", "play after the current song", () => addMix(m, "INSERT_AFTER_CURRENT_VIDEO")],
-       ["+ queue", "add to the end of the queue", () => addMix(m, "INSERT_AT_END")]]));
+    for (const m of st.mixes) {
+      const el = row(m.thumb, m.title, m.sub, "", () => playMix(m),
+        [["▶ next", "play after the current song", () => addMix(m, "INSERT_AFTER_CURRENT_VIDEO")],
+         ["+ queue", "add to the end of the queue", () => addMix(m, "INSERT_AT_END")]]);
+      el.addEventListener("mouseenter", () => firstSong(m));
+      list.append(el);
+    }
   } else {
     if (!st.results.length) { list.innerHTML = `<div class="empty">type something and press Enter</div>`; return; }
     for (const r of st.results) list.append(row(r.thumb, r.title, r.sub, "",
@@ -281,6 +284,31 @@ async function add(r, where, andPlay) {
   status(`queued: ${r.title}`);
   if (andPlay) setTimeout(() => act("next"), 400);   // click = play it now
   setTimeout(loadQueue, 700);
+}
+
+// Clicking a mix starts it now, like its play button in YouTube Music. Knowing its first song lets
+// the player start loading audio at once (≈0.7 s instead of ≈1.7 s), so rows prefetch it on hover.
+function firstSong(m) {
+  return m.first ||= api("search", { method: "POST", body: { query: `next:${m.playlistId}:${m.params}` } })
+    .then(d => {
+      let id = null;
+      const walk = o => {
+        if (id || !o || typeof o !== "object") return;
+        if (o.playlistPanelVideoRenderer && o.playlistPanelVideoRenderer.videoId) { id = o.playlistPanelVideoRenderer.videoId; return; }
+        for (const k in o) walk(o[k]);
+      };
+      walk(d);
+      return id;
+    })
+    .catch(() => null);
+}
+
+async function playMix(m) {
+  status(`starting ${m.title}…`);
+  const first = await firstSong(m);
+  await act("queue", { videoId: `play:${m.playlistId}:${first || ""}:${m.params}` });
+  status(`playing: ${m.title}`);
+  setTimeout(loadQueue, 1500);
 }
 
 // A mix queues as a playlist id (needs extras/pear-mixes); its ~200 tracks take a moment to
@@ -362,6 +390,7 @@ function parseMixes(data) {
   const out = [], seen = new Set();
   const pid = e => e && ((e.watchPlaylistEndpoint || e.watchEndpoint || {}).playlistId
     || (e.browseEndpoint && /^VL/.test(e.browseEndpoint.browseId) && e.browseEndpoint.browseId.slice(2)));
+  const params = e => (e && (e.watchPlaylistEndpoint || e.watchEndpoint || {}).params) || "wAEB";
   const walk = o => {
     if (Array.isArray(o)) { o.forEach(walk); return; }
     if (!o || typeof o !== "object") return;
@@ -370,7 +399,8 @@ function parseMixes(data) {
       const play = r.thumbnailOverlay && r.thumbnailOverlay.musicItemThumbnailOverlayRenderer
         && r.thumbnailOverlay.musicItemThumbnailOverlayRenderer.content.musicPlayButtonRenderer;
       const id = pid(play && play.playNavigationEndpoint) || pid(r.navigationEndpoint);
-      if (id && !seen.has(id) && seen.add(id)) out.push({ playlistId: id, title: runs(r.title), sub: runs(r.subtitle),
+      if (id && !seen.has(id) && seen.add(id)) out.push({ playlistId: id, params: params(play && play.playNavigationEndpoint),
+        title: runs(r.title), sub: runs(r.subtitle),
         thumb: thumbOf(r.thumbnailRenderer && r.thumbnailRenderer.musicThumbnailRenderer && r.thumbnailRenderer.musicThumbnailRenderer.thumbnail) });
       return;
     }
@@ -386,6 +416,7 @@ async function loadMixes() {
     const mixes = parseMixes(await api("search", { method: "POST", body: { query: "browse:FEmusic_mixed_for_you" } }));
     st.mixes = mixes;
     st.mixesNote = mixes.length ? "" : "no mixes: Pear needs the pear-mixes patch (extras/pear-mixes)";
+    mixes.slice(0, 4).forEach(firstSong);   // the pointer arrives at the top of the list
   } catch (e) { st.mixesNote = e.message; }
   if (st.tab === "mixes") renderList();
 }

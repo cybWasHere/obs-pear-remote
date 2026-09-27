@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Teach Pear Desktop's API two things, inside Pear's own logged-in session:
+"""Teach Pear Desktop's API a few things, inside Pear's own logged-in session:
 
 - POST /api/v1/queue with a playlist id (anything that isn't an 11-char video id) in `videoId`
   queues the whole playlist/mix (YouTube Music's get_queue with playlistId). It also fixes Pear's
   own add-to-queue, which adds nothing while a mix is playing.
 - POST /api/v1/search with query "browse:<browseId>" returns that browse page, e.g.
-  "browse:FEmusic_mixed_for_you" = your personal "Mixed for you" shelf.
+  "browse:FEmusic_mixed_for_you" = your personal "Mixed for you" shelf, and with
+  "next:<playlistId>:<params>" a playlist's first songs.
+- POST /api/v1/queue with "play:<playlistId>:<first videoId>:<params>" starts that playlist now,
+  like its play button in YouTube Music (videoId and params may be empty).
 
 Usage: patch-asar.py <app.asar> [--check]. Idempotent. If Pear's code no longer matches, it
 changes nothing and exits 2 (Pear keeps working, just without mixes).
@@ -31,9 +34,24 @@ PATCHES = [
       "...(t.length>11?{playlistId:t}:{videoIds:[t]})}",
       "queueInsertPosition:n,...(t.length>11?{playlistId:t}:{videoIds:[t]})}"],
      "queueInsertPosition:n,...(t.length!==11?{playlistId:t}:{videoIds:[t]})}"),
-    (["let o=await i.networkManager.fetch(`/search`,{query:t,"],
-     "let o=t.startsWith(`browse:`)?await i.networkManager.fetch(`/browse`,{browseId:t.slice(7),"
+    # search "browse:<browseId>" = a browse page; "next:<playlistId>:<params>" = a mix's first songs
+    # (the remote prefetches them on hover, so a click can start the first song straight away)
+    (["let o=await i.networkManager.fetch(`/search`,{query:t,",
+      "let o=t.startsWith(`browse:`)?await i.networkManager.fetch(`/browse`,{browseId:t.slice(7),"
+      "...(r?{continuation:r}:{})}):await i.networkManager.fetch(`/search`,{query:t,"],
+     "let o=t.startsWith(`next:`)?await i.networkManager.fetch(`/next`,{playlistId:t.split(`:`)[1],"
+     "params:t.split(`:`)[2]||`wAEB`,isAudioOnly:!0}):"
+     "t.startsWith(`browse:`)?await i.networkManager.fetch(`/browse`,{browseId:t.slice(7),"
      "...(r?{continuation:r}:{})}):await i.networkManager.fetch(`/search`,{query:t,"),
+    # queue "play:<playlistId>:<videoId>:<params>" = start that playlist now, like clicking its play
+    # button in YouTube Music; with the first song's videoId known, audio starts in well under 1 s
+    (["window.ipcRenderer.on(`peard:add-to-queue`,(e,t,n)=>{let r=document.querySelector(`#queue`),"
+      "i=document.querySelector(`ytmusic-app`);if(!i)return;"],
+     "window.ipcRenderer.on(`peard:add-to-queue`,(e,t,n)=>{let r=document.querySelector(`#queue`),"
+     "i=document.querySelector(`ytmusic-app`);if(!i)return;"
+     "if(t.startsWith(`play:`)){let[,l,v,m]=t.split(`:`);m||=`wAEB`;"
+     "i.resolveCommand(v?{watchEndpoint:{videoId:v,playlistId:l,params:m}}"
+     ":{watchPlaylistEndpoint:{playlistId:l,params:m}});return}"),
 ]
 
 
@@ -77,8 +95,9 @@ def main():
     src = blobs[TARGET].decode("utf-8")
     todo = []
     for olds, new in PATCHES:
-        # an earlier version of this patch can contain `new`, so "done" also needs every old form gone
-        if new in src and not any(o in src for o in olds):
+        # an earlier version of this patch can contain `new`, so "done" also needs every old form
+        # gone, except an old that `new` itself contains (a patch that inserts after its anchor)
+        if new in src and not any(o in src and o not in new for o in olds):
             continue
         # the longest match first: an earlier patch version contains the original as a prefix
         hits = [o for o in sorted(olds, key=len, reverse=True) if src.count(o) == 1]
