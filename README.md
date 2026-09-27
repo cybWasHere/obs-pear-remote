@@ -23,7 +23,9 @@ Two HTML files. No build, no plugin, nothing to install but Python.
 **Pear Remote** (`pear-remote.html`, a custom browser dock): play/pause, previous/next, seek,
 volume and mute, like/dislike, shuffle and repeat. It shows the live queue (click a song to jump to
 it, ✕ to remove it) and has a search box whose results you can play now, play next or add to the
-end. When the dock is wider than it is tall, it switches to a side-by-side layout.
+end. With an optional [Pear patch](#mixed-for-you-optional-pear-patch), a third tab lists your
+personal *Mixed for you* shelf (My Supermix, Discover Mix, My Mix 01…) and plays those too. When
+the dock is wider than it is tall, it switches to a side-by-side layout.
 
 **Now Playing** (`now-playing.html`, a browser source): cover, title and artist. Long titles
 scroll, the card dims while paused and hides itself when nothing is playing. On Linux it can also
@@ -104,9 +106,50 @@ py -m http.server 9870 --bind 127.0.0.1 --directory C:\path\to\obs-pear-remote  
   reload button. `?reload=0` turns that off.
 - **Search needs YouTube Music in English.** Results are filtered on its "Song" / "Video" labels.
 - **Pear 3.12.0 has two gaps.** It doesn't report repeat, mute or volume changes over its
-  websocket, so those buttons work but never light up. And on an endless radio/autoplay queue it
-  accepts "add to the end" but the song never appears (calling Pear's API directly does the same);
-  use **▶ next** there.
+  websocket, so those buttons work but never light up. And while a mix or radio plays, adding to
+  the queue silently does nothing: Pear sends YouTube the current queue's context, and YouTube then
+  returns no songs. The [Pear patch](#mixed-for-you-optional-pear-patch) fixes that as well.
+
+## Mixed for you (optional Pear patch)
+
+Your personal mixes need your YouTube login, and Pear's API can't queue a playlist or read your
+home page. `extras/pear-mixes/patch-asar.py` adds both to Pear with two small edits to its
+`app.asar`, so the work happens inside Pear's own logged-in session. No cookies or tokens leave
+Pear, and nothing new listens on the network. Then:
+
+- `POST /api/v1/queue` accepts a playlist id in `videoId` (a mix is about 200 songs), and adds
+  songs while a mix plays;
+- `POST /api/v1/search` with the query `browse:FEmusic_mixed_for_you` returns your shelf, which
+  the remote's Mixes tab (the grid icon) lists.
+
+<details>
+<summary><b>Installing it (Linux, pear-desktop-bin)</b></summary>
+<br>
+
+Test it on a copy first. It refuses to touch a file whose code doesn't match, and checks that
+every other file reads back unchanged:
+
+```sh
+cp "/opt/YouTube Music/resources/app.asar" /tmp/pear-test.asar
+python3 extras/pear-mixes/patch-asar.py /tmp/pear-test.asar
+```
+
+Then back up the real file, install the patcher and a pacman hook (package updates overwrite
+`app.asar`; the hook patches it again), patch, and restart Pear:
+
+```sh
+cp "/opt/YouTube Music/resources/app.asar" ~/pear-app.asar.bak
+sudo install -Dm755 extras/pear-mixes/patch-asar.py /usr/local/lib/pear-mixes/patch-asar.py
+sudo install -Dm644 extras/pear-mixes/pear-mixes.hook /etc/pacman.d/hooks/pear-mixes.hook
+sudo python3 /usr/local/lib/pear-mixes/patch-asar.py "/opt/YouTube Music/resources/app.asar"
+```
+
+The patcher is installed root-owned rather than run from your home folder, because pacman runs
+the hook as root. If a Pear update changes the patched code, the hook prints a warning and leaves
+Pear alone; it just has no mixes until the patch is updated. To undo, copy the backup back and
+delete the hook. Tested with Pear 3.12.0.
+
+</details>
 
 ## Options
 
@@ -152,6 +195,7 @@ have no such field, so the remote needs a theme block.
 | **Nothing loads** | Is the server running? `http://127.0.0.1:9870/pear-remote.html` should open in a normal browser too. The URL must start with `http://`, not `file://`. |
 | **The card never appears** | *Plugins › Amuse* is off, or nothing is playing. `http://127.0.0.1:9863/query` should return JSON. |
 | **Queue empty or song missing right after Pear starts** | Pear reports the player state only after its first player event. Press play/pause once. |
+| **Mixes tab: "Pear needs the pear-mixes patch"** | Pear isn't patched, or an update replaced `app.asar` without the hook. See [Mixed for you](#mixed-for-you-optional-pear-patch). |
 | **The card ignores your edits** | OBS caches the page (Python's server sends no cache headers). In the source's properties, click *Refresh cache of current page*. |
 | **Windows: "Python 3 was not found, or it does not start"** | `py` or `python` points at a Python that was uninstalled. Reinstall it from python.org. |
 | **Windows firewall prompt for YouTube Music** | That's Pear: its Amuse plugin listens on every interface. *Cancel* is fine, the widgets only talk to `127.0.0.1`. |

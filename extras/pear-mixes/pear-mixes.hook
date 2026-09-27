@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = pear-desktop-bin
+
+[Action]
+Description = Re-applying the Pear mixes patch (obs-pear-remote)...
+When = PostTransaction
+Exec = /usr/bin/python3 /usr/local/lib/pear-mixes/patch-asar.py "/opt/YouTube Music/resources/app.asar"
