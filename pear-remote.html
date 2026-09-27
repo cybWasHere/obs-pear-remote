@@ -286,20 +286,26 @@ async function add(r, where, andPlay) {
 // A mix queues as a playlist id (needs extras/pear-mixes); its ~200 tracks take a moment to
 // arrive, so wait for the queue to grow before skipping into it.
 async function addMix(m, where, andPlay) {
+  const t0 = Date.now(), log = (...a) => console.log(`[mix ${m.playlistId} +${Date.now() - t0}ms]`, ...a);
   let before;
-  try { before = ((await api("queue")) || {}).items?.length ?? 0; } catch { before = 0; }
+  try { before = ((await api("queue")) || {}).items?.length ?? 0; } catch (e) { before = 0; log("queue read failed:", e.message); }
+  log("queue before:", before, "insert:", where);
   status(`queueing ${m.title}…`);
-  await act("queue", { videoId: m.playlistId, insertPosition: where });
-  for (let i = 0; i < 20; i++) {
+  try { await api("queue", { method: "POST", body: { videoId: m.playlistId, insertPosition: where } }); log("POST ok"); }
+  catch (e) { log("POST failed:", e.message); return status(`${m.title}: ${e.message}`, true); }
+  let n = before;
+  while (Date.now() - t0 < 10000) {
     await new Promise(r => setTimeout(r, 250));
-    const n = ((await api("queue").catch(() => null)) || {}).items?.length ?? 0;
+    n = ((await api("queue").catch(() => null)) || {}).items?.length ?? n;
     if (n > before) {
+      log("queue grew to", n);
       status(`queued: ${m.title} (${n - before} songs)`);
       if (andPlay) await act("next");
       return setTimeout(loadQueue, 500);
     }
   }
-  status(`${m.title}: nothing was queued; is Pear patched? (extras/pear-mixes)`, true);
+  log("queue never grew; still", n);
+  status(`${m.title}: Pear accepted it but queued nothing (queue ${before} → ${n}); is Pear patched? (extras/pear-mixes)`, true);
 }
 
 // ---- youtube music data ----
