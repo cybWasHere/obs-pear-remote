@@ -295,7 +295,7 @@ async function addMix(m, where, andPlay) {
   catch (e) { log("POST failed:", e.message); return status(`${m.title}: ${e.message}`, true); }
   let n = before;
   while (Date.now() - t0 < 10000) {
-    await new Promise(r => setTimeout(r, 250));
+    await new Promise(r => setTimeout(r, 150));
     n = ((await api("queue").catch(() => null)) || {}).items?.length ?? n;
     if (n > before) {
       log("queue grew to", n);
