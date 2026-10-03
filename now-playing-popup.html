@@ -11,7 +11,10 @@
      &side=left|right (the edge it slides in from and sits against), &scale=2 (size; 1 = the
      dock's own size), &theme=ferra|midnight, &ambient=1 (colours from the cover, like the
      dock's droplet button), &amuse=http://127.0.0.1:9863/query (default tries 127.0.0.1 then
-     localhost) -->
+     localhost).
+     On the desktop instead of in OBS: a host window that stays unmapped between tracks can watch
+     the page title, which starts with "▶ " exactly while the popup is up (pear-corner's
+     pear-popup.py does this). -->
 <style>
   /* themes: the same blocks as pear-remote.html; pick one with ?theme=, copy a block to add
      your own, or override these variables in the browser source's Custom CSS field */
@@ -93,7 +96,8 @@ document.body.classList.toggle("right", P.get("side") === "right");
 document.body.style.zoom = parseFloat(P.get("scale")) || 2;
 $("toast").style.setProperty("--hold", `${HOLD}s`);
 
-let lastId = null, showing = 0, hideTimer = null;
+const TITLE = document.title;
+let lastId = null, showing = 0, hideTimer = null, goneTimer = null;
 let lastErr = null, reported = null;
 
 // ---- ambient: theme colours from the cover, the same recipe as the dock ----
@@ -202,6 +206,12 @@ async function show(t) {
   if (AMBIENT && !img) img = await load(t.cover, false);
   if (turn !== showing) return;   // another track started meanwhile
   if (AMBIENT) ambient(cors ? img : null);
+  // tell a host window to map, then wait for a frame: a hidden page gets none, so the slide-in
+  // starts when the window is really on screen (or after 1 s, whichever comes first)
+  clearTimeout(goneTimer);
+  document.title = `▶ ${t.title || ""}`;
+  await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 1000); });
+  if (turn !== showing) return;
 
   const toast = $("toast"), cover = $("cover");
   cover.crossOrigin = cors ? "anonymous" : null;   // same request as the preload, so it comes from cache
@@ -216,7 +226,10 @@ async function show(t) {
   clearTimeout(hideTimer);
   if (HOLD) {
     toast.classList.add("timed");
-    hideTimer = setTimeout(() => toast.classList.remove("show"), HOLD * 1000);
+    hideTimer = setTimeout(() => {
+      toast.classList.remove("show");
+      goneTimer = setTimeout(() => { document.title = TITLE; }, 600);   // once it has slid out
+    }, HOLD * 1000);
   }
   console.log(`[popup] showing: ${t.title}`);
 }
