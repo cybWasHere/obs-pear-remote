@@ -3,7 +3,7 @@
 # obs-pear-remote
 
 **Control Pear Desktop from an OBS dock, and put what's playing on stream.**<br>
-Two HTML files. No build, no plugin, nothing to install but Python.
+Three HTML files. No build, no plugin, nothing to install but Python.
 
 [![OBS 30+](https://img.shields.io/badge/OBS-30%2B-302e31?logo=obsstudio&logoColor=white)](#quick-start)
 [![Pear Desktop](https://img.shields.io/badge/Pear%20Desktop-3.12-ff0000?logo=youtubemusic&logoColor=white)](https://github.com/pear-devs/pear-desktop)
@@ -35,6 +35,14 @@ show the YouTube video playing in your browser ("Now watching") while Pear is id
 <img src="screenshots/now-playing.png" width="560" alt="Now Playing card">
 </div>
 
+**Now Playing popup** (`now-playing-popup.html`, a browser source): the same information, but
+only when a new track starts. It slides in looking like the remote, stays for six seconds while a
+bar along its bottom edge fills, then leaves. Use it instead of the card, or next to it.
+
+<div align="center">
+<img src="screenshots/now-playing-popup.png" width="560" alt="Now Playing popup, Ferra theme">
+</div>
+
 ## Quick start
 
 **1. In Pear**, open **Plugins** and enable **API Server** (keep port `26538` and *Authorize at
@@ -55,9 +63,11 @@ On Windows, double-click `extras\start-server.cmd` instead; closing its window s
 |---|---|---|
 | Remote | *Docks › Custom Browser Docks…* | `http://127.0.0.1:9870/pear-remote.html` |
 | Card | *Browser* source, 800 × 300 | `http://127.0.0.1:9870/now-playing.html` |
+| Popup | *Browser* source, 800 × 240 | `http://127.0.0.1:9870/now-playing-popup.html` |
 
 The first time the dock connects, Pear asks whether to allow `obs-pear-remote`. Click **Allow**;
-Pear remembers it. The card's background is already transparent.
+Pear remembers it. The card's and the popup's backgrounds are already transparent. The popup is
+invisible between tracks: add `?hold=0` to its URL while you place it, which keeps it up.
 
 <details>
 <summary><b>Requirements</b></summary>
@@ -100,8 +110,8 @@ py -m http.server 9870 --bind 127.0.0.1 --directory C:\path\to\obs-pear-remote  
 - **Keep `--bind 127.0.0.1`.** The API server controls your playback, so the page holding its token
   should only be reachable from your own machine. Serving over `http://` rather than opening the
   files as `file://` also avoids the cross-origin and local-network restrictions of OBS's browser.
-- **Amuse does double duty.** The card reads everything from it; the remote uses it only as a
-  fallback for the current song until Pear sends its first player event.
+- **Amuse does double duty.** The card and the popup read everything from it; the remote uses it
+  only as a fallback for the current song until Pear sends its first player event.
 - **The dock reloads itself** whenever `pear-remote.html` changes on disk, since docks have no
   reload button. `?reload=0` turns that off.
 - **Search needs YouTube Music in English.** Results are filtered on its "Song" / "Video" labels.
@@ -176,6 +186,17 @@ Append them to the URL, e.g. `pear-remote.html?theme=midnight&amuse=0`.
 | `video` | `/mpris.json` | browser YouTube fallback from `serve.py`; `0` turns it off |
 | `theme` | `purple` | `purple` or `mono` |
 
+**now-playing-popup.html**
+
+| option | default | what it does |
+|---|---|---|
+| `hold` | `6` | seconds on screen; `0` keeps it up until the next track |
+| `side` | `left` | `left` or `right`: the edge of the source it slides in from and sits against |
+| `scale` | `2` | size; `1` is the dock's own size. At `2` the popup is at most 720 px wide |
+| `theme` | `ferra` | `ferra` or `midnight`, the remote's themes |
+| `ambient` | `0` | `1` takes the colours from the cover instead of the theme |
+| `amuse` | `127.0.0.1:9863`, then `localhost:9863` | Amuse endpoint to poll |
+
 <details>
 <summary><b>Making your own theme</b></summary>
 <br>
@@ -183,7 +204,7 @@ Append them to the URL, e.g. `pear-remote.html?theme=midnight&amuse=0`.
 All colours are CSS variables in `:root[data-theme="…"]` blocks at the top of each file. Copy a
 block, give it a new name, change the colours and select it with `?theme=`.
 
-For the card you can leave the file alone and override the variables in the browser source's
+For the card and the popup you can leave the file alone and override the variables in the browser source's
 **Custom CSS** field instead, e.g. `:root { --accent: #7fdbca; --panel: rgba(0,0,0,.6); }`. Docks
 have no such field, so the remote needs a theme block.
 
@@ -196,7 +217,7 @@ have no such field, so the remote needs a theme block.
 | **"Pear API server not reachable"** | Pear isn't running, *Plugins › API Server* is off, or it listens on another port (set `?api=`). |
 | **"Pear denied obs-pear-remote"** | Someone clicked Deny. Pear doesn't remember a denial, so reload the dock to be asked again: save `pear-remote.html` in any editor (the reload-on-change check picks it up) or restart OBS. |
 | **Nothing loads** | Is the server running? `http://127.0.0.1:9870/pear-remote.html` should open in a normal browser too. The URL must start with `http://`, not `file://`. |
-| **The card never appears** | *Plugins › Amuse* is off, or nothing is playing. `http://127.0.0.1:9863/query` should return JSON. |
+| **The card or popup never appears** | *Plugins › Amuse* is off, or nothing is playing. `http://127.0.0.1:9863/query` should return JSON. |
 | **Queue empty or song missing right after Pear starts** | Pear reports the player state only after its first player event. Press play/pause once. |
 | **Mixes tab: "Pear needs the pear-mixes patch"** | Pear isn't patched, or an update replaced `app.asar` without the hook. See [Mixed for you](#mixed-for-you-optional-pear-patch). |
 | **The card ignores your edits** | OBS caches the page (Python's server sends no cache headers). In the source's properties, click *Refresh cache of current page*. |
@@ -211,6 +232,6 @@ coding agent, directed by the repo owner, who tested them in OBS on Linux and Wi
 has reviewed the code line by line. Read it before you trust it.
 
 **Thank you, [pear-devs](https://github.com/pear-devs/pear-desktop).** Their API Server and Amuse
-plugins do the real work; this repo is two pages that talk to them.
+plugins do the real work; this repo is three pages that talk to them.
 
 **License.** MIT, see [LICENSE](LICENSE).

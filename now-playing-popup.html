@@ -1,0 +1,237 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Now Playing popup</title>
+<!-- Now Playing popup: an OBS browser source that pops up when Pear Desktop (YouTube Music)
+     starts a new track, then leaves again. It looks like the Pear Remote dock.
+     Browser source URL http://127.0.0.1:9870/now-playing-popup.html, 800x240, transparent.
+     Reads Pear's Plugins > Amuse endpoint (read-only, no auth).
+     Options: ?hold=6 (seconds on screen; 0 = stay up, handy while you place the source),
+     &side=left|right (the edge it slides in from and sits against), &scale=2 (size; 1 = the
+     dock's own size), &theme=ferra|midnight, &ambient=1 (colours from the cover, like the
+     dock's droplet button), &amuse=http://127.0.0.1:9863/query (default tries 127.0.0.1 then
+     localhost) -->
+<style>
+  /* themes: the same blocks as pear-remote.html; pick one with ?theme=, copy a block to add
+     your own, or override these variables in the browser source's Custom CSS field */
+  :root, :root[data-theme="ferra"] {   /* Halloy's Ferra palette */
+    --bg: #242226; --surface: #2b292d; --sunken: #201e21; --line: #3e3c41; --line2: #4f474d;
+    --text: #fecdb2; --muted: #ab8a79; --dim: #6f5d63;
+    --accent: #f6b6c9; --accent-hi: #ffc9d7; --row-cur: #453d41;
+    --coral: #ffa07a; --red: #e06b75;
+  }
+  :root[data-theme="midnight"] {
+    --bg: #1b1e24; --surface: #232730; --sunken: #16181d; --line: #313643; --line2: #414856;
+    --text: #dde3ee; --muted: #98a2b3; --dim: #5f6878;
+    --accent: #7aa2f7; --accent-hi: #9bb8ff; --row-cur: #2b3446;
+    --coral: #e0af68; --red: #f7768e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; overflow: hidden; }
+  body { padding: 16px; display: flex; color: var(--text);
+         font: 12px/1.35 "Hack", "Noto Sans Mono", monospace; }
+  body.right { justify-content: flex-end; }
+
+  .toast {
+    position: relative; overflow: hidden;
+    display: flex; gap: 10px; align-items: center;
+    min-width: 220px; max-width: 360px; padding: 10px 12px 12px 10px;
+    background-color: var(--bg);
+    /* ambient mode: a wash of the cover's colour, as behind the dock's player */
+    background-image: radial-gradient(130% 100% at 0 0, var(--glow, transparent), transparent 75%);
+    border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, .45);
+    opacity: 0; transform: translateX(-28px);
+    transition: opacity .45s ease, transform .45s cubic-bezier(.2, .9, .3, 1.15);
+  }
+  .right .toast { transform: translateX(28px); }
+  .toast.show { opacity: 1; transform: none; }
+
+  #cover { width: 64px; height: 64px; border-radius: 6px; object-fit: cover; background: var(--sunken);
+           border: 1px solid var(--line); flex: none; }
+  #meta { min-width: 0; flex: 1; }
+  #label { display: flex; align-items: center; gap: 5px; margin-bottom: 3px;
+           color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; }
+  #label svg { width: 10px; height: 10px; fill: var(--accent); flex: none; }
+  #title { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+  #artist { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* the dock's seek bar, used as a countdown: full when the popup is about to leave */
+  #track { position: absolute; inset: auto 0 0 0; height: 3px; background: var(--line); }
+  #fill { width: 100%; height: 100%; background: var(--accent); transform-origin: 0 50%; transform: scaleX(0); }
+  .right #fill { transform-origin: 100% 50%; }
+  .toast.timed #fill { animation: fill var(--hold) linear forwards; }
+  @keyframes fill { to { transform: scaleX(1); } }
+
+  .swap { animation: swap .4s ease; }
+  @keyframes swap { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<script>document.documentElement.dataset.theme = new URLSearchParams(location.search).get("theme") || "ferra";</script>
+
+<div class="toast" id="toast">
+  <img id="cover" alt="">
+  <div id="meta">
+    <div id="label"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>Now playing</div>
+    <div id="title"></div>
+    <div id="artist"></div>
+  </div>
+  <div id="track"><div id="fill"></div></div>
+</div>
+
+<script>
+const P = new URLSearchParams(location.search);
+const API = P.get("amuse") ? [P.get("amuse")] : ["http://127.0.0.1:9863/query", "http://localhost:9863/query"];
+const HOLD = P.has("hold") ? Math.max(0, parseFloat(P.get("hold")) || 0) : 6;   // 0 = stay up
+const AMBIENT = P.get("ambient") === "1";
+const $ = id => document.getElementById(id);
+const root = document.documentElement;
+
+document.body.classList.toggle("right", P.get("side") === "right");
+document.body.style.zoom = parseFloat(P.get("scale")) || 2;
+$("toast").style.setProperty("--hold", `${HOLD}s`);
+
+let lastId = null, showing = 0, hideTimer = null;
+let lastErr = null, reported = null;
+
+// ---- ambient: theme colours from the cover, the same recipe as the dock ----
+// Colours are built in OKLCH: hue (and how much colour) from the cover, lightness fixed per
+// role, so text stays readable whatever the cover looks like.
+const ROLES = { "--bg": [.25, .032], "--sunken": [.215, .028], "--line": [.36, .04], "--text": [.91, .045],
+                "--muted": [.71, .06], "--dim": [.52, .045] };
+const AMBIENT_VARS = [...Object.keys(ROLES), "--accent", "--glow"];
+
+function oklab(r, g, b) {
+  [r, g, b] = [r, g, b].map(c => (c /= 255) <= .04045 ? c / 12.92 : ((c + .055) / 1.055) ** 2.4);
+  const l = Math.cbrt(.4122214708 * r + .5363325363 * g + .0514459929 * b),
+        m = Math.cbrt(.2119034982 * r + .6806995451 * g + .1073969566 * b),
+        s = Math.cbrt(.0883024619 * r + .2817188376 * g + .6299787005 * b);
+  return [.2104542553 * l + .793617785 * m - .0040720468 * s,
+          1.9779984951 * l - 2.428592205 * m + .4505937099 * s,
+          .0259040371 * l + .7827717662 * m - .808675766 * s];
+}
+
+function oklchHex(L, C, h, alpha = "") {
+  for (; ; C -= .005) {   // out of sRGB: give up colour, not lightness
+    const a = C * Math.cos(h), b = C * Math.sin(h);
+    const l = (L + .3963377774 * a + .2158037573 * b) ** 3, m = (L - .1055613458 * a - .0638541728 * b) ** 3,
+          s = (L - .0894841775 * a - 1.291485548 * b) ** 3;
+    const rgb = [4.0767416621 * l - 3.3077115913 * m + .2309699292 * s,
+                 -1.2684380046 * l + 2.6097574011 * m - .3413193965 * s,
+                 -.0041960863 * l - .7034186147 * m + 1.707614701 * s];
+    if (C > 0 && rgb.some(c => c < -.001 || c > 1.001)) continue;
+    return "#" + rgb.map(c => {
+      c = Math.max(0, Math.min(1, c));
+      c = c <= .0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - .055;
+      return Math.round(c * 255).toString(16).padStart(2, "0");
+    }).join("") + alpha;
+  }
+}
+
+// main = the hue covering the most of the cover (tints the panel); accent = the strongest
+// other hue if there is one, so a blue cover with an orange sun gets an orange bar
+function coverPalette(img) {
+  const N = 32, BINS = 36, cv = document.createElement("canvas");
+  cv.width = cv.height = N;
+  const cx = cv.getContext("2d", { willReadFrequently: true });
+  cx.drawImage(img, 0, 0, N, N);
+  const px = cx.getImageData(0, 0, N, N).data;   // throws if the image host sent no CORS header
+  const bins = Array.from({ length: BINS }, () => ({ w: 0, x: 0, y: 0, n: 0 }));
+  let total = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    const [, a, b] = oklab(px[i], px[i + 1], px[i + 2]), c = Math.hypot(a, b);
+    total += c;
+    if (c < .02) continue;   // greys have no hue worth counting
+    const bin = bins[Math.floor(((Math.atan2(b, a) / (2 * Math.PI) + 1) % 1) * BINS) % BINS];
+    bin.w += c; bin.x += a; bin.y += b; bin.n++;
+  }
+  const near = (i, d) => bins[(i + d + BINS) % BINS];
+  const score = i => near(i, -1).w / 2 + bins[i].w + near(i, 1).w / 2;
+  const pick = ok => bins.map((_, i) => i).filter(ok).sort((p, q) => score(q) - score(p))[0];
+  const hue = i => Math.atan2(near(i, -1).y + bins[i].y + near(i, 1).y, near(i, -1).x + bins[i].x + near(i, 1).x);
+  const chroma = i => { const n = near(i, -1).n + bins[i].n + near(i, 1).n; return n ? score(i) / n : 0; };
+  const main = pick(() => true);
+  if (!score(main)) return { h: 0, k: 0, ah: 0, ak: 0 };   // black and white cover
+  const far = i => Math.min(Math.abs(i - main), BINS - Math.abs(i - main)) >= 6;   // 60° away
+  const alt = pick(i => far(i) && score(i) > score(main) * .15 && chroma(i) > .05);
+  const acc = alt ?? main;
+  return { h: hue(main), k: Math.min(1, total / (N * N) / .045), ah: hue(acc), ak: Math.min(1, chroma(acc) / .09) };
+}
+
+function ambient(img) {
+  let p = null;
+  if (img) try { p = coverPalette(img); } catch (e) { console.warn("[popup] ambient:", e.message); }
+  if (!p) { AMBIENT_VARS.forEach(v => root.style.removeProperty(v)); return; }
+  for (const [v, [L, C]] of Object.entries(ROLES)) root.style.setProperty(v, oklchHex(L, C * p.k, p.h));
+  root.style.setProperty("--accent", oklchHex(.82, (p.ak ? 1 : 0) * (.04 + .09 * p.ak), p.ah));
+  root.style.setProperty("--glow", oklchHex(.45, .11 * p.k, p.h, "66"));
+}
+
+// ---- popup ----
+async function query() {
+  for (const url of API) {
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      if (r.ok) return await r.json();
+    } catch (e) { lastErr = `${url}: ${e}`; }
+  }
+  if (lastErr !== reported) { console.error(`[popup] Pear API unreachable: ${lastErr}`); reported = lastErr; }
+  return null;
+}
+
+// resolves with the loaded image, or null if it fails or takes too long
+function load(src, cors) {
+  return new Promise(done => {
+    if (!src) return done(null);
+    const img = new Image();
+    if (cors) img.crossOrigin = "anonymous";
+    img.onload = () => done(img);
+    img.onerror = () => done(null);
+    setTimeout(() => done(null), 2500);
+    img.src = src;
+  });
+}
+
+async function show(t) {
+  const turn = ++showing;
+  // have the cover (and its colours) ready before sliding in, so the popup never arrives blank
+  let img = await load(t.cover, AMBIENT);
+  const cors = !!img;
+  if (AMBIENT && !img) img = await load(t.cover, false);
+  if (turn !== showing) return;   // another track started meanwhile
+  if (AMBIENT) ambient(cors ? img : null);
+
+  const toast = $("toast"), cover = $("cover");
+  cover.crossOrigin = cors ? "anonymous" : null;   // same request as the preload, so it comes from cache
+  if (img) cover.src = t.cover; else cover.removeAttribute("src");
+  $("title").textContent = t.title || "";
+  $("artist").textContent = t.author || "";
+  toast.classList.remove("timed");
+  for (const id of ["title", "artist"]) $(id).classList.remove("swap");
+  void toast.offsetWidth;   // restart the countdown and the text animation
+  if (toast.classList.contains("show")) for (const id of ["title", "artist"]) $(id).classList.add("swap");
+  toast.classList.add("show");
+  clearTimeout(hideTimer);
+  if (HOLD) {
+    toast.classList.add("timed");
+    hideTimer = setTimeout(() => toast.classList.remove("show"), HOLD * 1000);
+  }
+  console.log(`[popup] showing: ${t.title}`);
+}
+
+async function tick() {
+  const d = await query();
+  const t = d && d.player && d.player.hasSong && d.track && !d.track.isAdvertisement ? d.track : null;
+  // a paused track isn't playing yet: wait, and pop up when it starts
+  if (!t || t.id === lastId || d.player.isPaused) return;
+  lastId = t.id;
+  show(t);
+}
+
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
