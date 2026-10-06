@@ -64,13 +64,21 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if urlparse(self.path).path != "/mpris.json":
             return super().do_GET()
+        # What you are watching is not for other websites: no wildcard CORS, and on loopback
+        # refuse a Host that is not ours (a foreign name pointed at 127.0.0.1 would be same-origin)
+        host, port = self.server.server_address[:2]
+        local = {f"{h}:{port}" for h in ("127.0.0.1", "localhost", "[::1]")}
+        if host in ("127.0.0.1", "::1") and self.headers.get("Host") not in local:
+            return self.send_error(403)
         global _cache
         if time.monotonic() - _cache[0] > 0.8:    # the card polls every second
             _cache = (time.monotonic(), json.dumps(youtube_now()).encode())
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if self.headers.get("Origin") in {"http://" + h for h in local}:    # localhost vs 127.0.0.1
+            self.send_header("Access-Control-Allow-Origin", self.headers["Origin"])
+            self.send_header("Vary", "Origin")
         self.send_header("Content-Length", str(len(_cache[1])))
         self.end_headers()
         self.wfile.write(_cache[1])
