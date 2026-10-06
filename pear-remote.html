@@ -588,7 +588,14 @@ async function connect() {
   const ws = new WebSocket(`${API.replace("http", "ws")}/api/v1/ws?token=${encodeURIComponent(token)}`);
   ws.onopen = () => { backoff = 1000; status("connected"); loadQueue(); loadLike(); };
   ws.onmessage = ev => { try { apply(JSON.parse(ev.data)); } catch { } };
-  ws.onclose = () => { status("reconnecting…", true); setTimeout(connect, backoff = Math.min(backoff * 2, 15000)); };
+  ws.onclose = () => {
+    // Pear may have died mid-song: stop the seek bar where it is, and let the Amuse fallback
+    // own the song again until Pear sends a real one
+    st.position = livePos(); st.posAt = performance.now(); st.playing = false;
+    if (st.song) st.song.fromAmuse = true;
+    renderControls();
+    status("reconnecting…", true); setTimeout(connect, backoff = Math.min(backoff * 2, 15000));
+  };
 }
 
 // Pear only reports the song over the socket after its first player event, so until then
