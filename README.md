@@ -150,8 +150,17 @@ sudo python3 /usr/local/lib/pear-mixes/patch-asar.py "/opt/YouTube Music/resourc
 
 The patcher is installed root-owned rather than run from your home folder, because pacman runs
 the hook as root. If a Pear update changes the patched code, the hook prints a warning and leaves
-Pear alone; it just has no mixes until the patch is updated. To undo, copy the backup back and
-delete the hook. Tested with Pear 3.12.0.
+Pear alone; it just has no mixes until the patch is updated. Tested with Pear 3.12.0.
+
+To undo, remove the hook and the patcher, then reinstall the package for a pristine `app.asar`:
+
+```sh
+sudo rm -r /etc/pacman.d/hooks/pear-mixes.hook /usr/local/lib/pear-mixes
+paru -S pear-desktop-bin    # or your AUR helper
+```
+
+The backup from above only fits the Pear version it was taken from: after an update it is the
+previous version's `app.asar`, so copy it back only if Pear hasn't been updated since.
 
 </details>
 
