@@ -363,9 +363,9 @@ function renderList() {
   list.textContent = "";
   if (st.tab === "queue") {
     if (!st.queue.length) { list.innerHTML = `<div class="empty">queue is empty</div>`; return; }
-    st.queue.forEach((q, i) => list.append(row(q.thumb, q.title, `${q.by}  ${q.len}`, q.cur ? "cur" : "",
-      () => act("queue", { index: i }, "PATCH").then(() => setTimeout(loadQueue, 600)),
-      [["✕", "remove from queue", () => act(`queue/${i}`, null, "DELETE").then(loadQueue)]])));
+    st.queue.forEach(q => list.append(row(q.thumb, q.title, `${q.by}  ${q.len}`, q.cur ? "cur" : "",
+      () => queueAct(q, i => act("queue", { index: i }, "PATCH").then(() => setTimeout(loadQueue, 600))),
+      [["✕", "remove from queue", () => queueAct(q, i => act(`queue/${i}`, null, "DELETE").then(loadQueue))]])));
     // centre the current song by scrolling the list only; scrollIntoView would also scroll
     // the page itself and make the whole dock jump. Only when the tab opens or the song changes:
     // the periodic refreshes keep the scroll position
@@ -388,6 +388,17 @@ function renderList() {
       [["▶ next", "play after the current song", () => add(r, "INSERT_AFTER_CURRENT_VIDEO")],
        ["+ queue", "add to the end of the queue", () => add(r, "INSERT_AT_END")]]));
   }
+}
+
+// The list on screen can be up to 30 s old (Pear sends no queue-change event), so look the row's
+// song up in the queue as it is now and act on the index it has there
+async function queueAct(q, fn) {
+  let now;
+  try { now = parseQueue(await api("queue")); } catch (e) { return status(e.message, true); }
+  const hit = now.filter(n => n.videoId === q.videoId).sort((a, b) => Math.abs(a.index - q.index) - Math.abs(b.index - q.index))[0];
+  if (hit) return fn(hit.index);
+  st.queue = now; if (st.tab === "queue") renderList();
+  status(`${q.title} is no longer in the queue`, true);
 }
 
 async function add(r, where, andPlay) {
@@ -455,11 +466,13 @@ const runs = r => (r && r.runs || []).map(x => x.text).join("");
 const thumbOf = t => { const a = t && t.thumbnails; return a && a.length ? a[0].url : ""; };
 
 function parseQueue(data) {
-  return (data && data.items || []).map(it => {
+  // index = the place in Pear's own list, which is what its queue endpoints take; rows dropped
+  // below must not shift it
+  return (data && data.items || []).map((it, index) => {
     const r = it.playlistPanelVideoRenderer
       || (it.playlistPanelVideoWrapperRenderer && it.playlistPanelVideoWrapperRenderer.primaryRenderer.playlistPanelVideoRenderer);
     if (!r) return null;
-    return { title: runs(r.title), by: runs(r.shortBylineText), len: runs(r.lengthText), videoId: r.videoId,
+    return { index, title: runs(r.title), by: runs(r.shortBylineText), len: runs(r.lengthText), videoId: r.videoId,
              thumb: thumbOf(r.thumbnail), cur: !!r.selected };
   }).filter(Boolean);
 }
