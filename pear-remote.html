@@ -357,8 +357,9 @@ function row(img, title, sub, cls, onClick, acts) {
   return el;
 }
 
+let centred = null;   // videoId the queue list was last centred on; setTab() clears it
 function renderList() {
-  const list = $("list");
+  const list = $("list"), top = list.scrollTop;
   list.textContent = "";
   if (st.tab === "queue") {
     if (!st.queue.length) { list.innerHTML = `<div class="empty">queue is empty</div>`; return; }
@@ -366,9 +367,11 @@ function renderList() {
       () => act("queue", { index: i }, "PATCH").then(() => setTimeout(loadQueue, 600)),
       [["✕", "remove from queue", () => act(`queue/${i}`, null, "DELETE").then(loadQueue)]])));
     // centre the current song by scrolling the list only; scrollIntoView would also scroll
-    // the page itself and make the whole dock jump
-    const cur = list.querySelector(".cur");
-    if (cur) list.scrollTop = cur.offsetTop - (list.clientHeight - cur.offsetHeight) / 2;
+    // the page itself and make the whole dock jump. Only when the tab opens or the song changes:
+    // the periodic refreshes keep the scroll position
+    const cur = list.querySelector(".cur"), id = (st.queue.find(q => q.cur) || {}).videoId;
+    if (cur && id !== centred) { centred = id; list.scrollTop = cur.offsetTop - (list.clientHeight - cur.offsetHeight) / 2; }
+    else list.scrollTop = top;
   } else if (st.tab === "mixes") {
     if (!st.mixes.length) { list.innerHTML = `<div class="empty"></div>`; list.firstChild.textContent = st.mixesNote; return; }
     for (const m of st.mixes) {
@@ -613,7 +616,7 @@ $("bar").onclick = e => {
 };
 
 function setTab(t) {
-  st.tab = t;
+  st.tab = t; centred = null;
   $("tabQueue").classList.toggle("on", t === "queue");
   $("tabMixes").classList.toggle("on", t === "mixes");
   $("tabSearch").classList.toggle("on", t === "search");
