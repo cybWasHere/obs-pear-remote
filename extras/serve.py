@@ -4,6 +4,9 @@ in your browser, read from MPRIS (Linux only; elsewhere it always answers {}). T
 when Pear has nothing playing.
 
     python3 extras/serve.py 9870 --bind 127.0.0.1 --directory .
+
+/mpris.json is readable by pages this server serves, and by nobody else. To let another local page
+read it (a start page served on its own port), name its origin: --allow-origin http://127.0.0.1:9875
 """
 import argparse, functools, json, re, subprocess, time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -11,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 WATCH = re.compile(r"^https://(www\.|m\.)?youtube\.com/(watch|shorts/|live/)|^https://youtu\.be/")
 _cache = (0.0, b"{}")
+ALLOWED = set()    # extra origins that may read /mpris.json, from --allow-origin
 
 
 def busctl(*args):
@@ -76,7 +80,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
-        if self.headers.get("Origin") in {"http://" + h for h in local}:    # localhost vs 127.0.0.1
+        if self.headers.get("Origin") in {"http://" + h for h in local} | ALLOWED:    # localhost vs 127.0.0.1
             self.send_header("Access-Control-Allow-Origin", self.headers["Origin"])
             self.send_header("Vary", "Origin")
         self.send_header("Content-Length", str(len(_cache[1])))
@@ -93,7 +97,10 @@ if __name__ == "__main__":
     ap.add_argument("port", type=int, nargs="?", default=9870)
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--directory", default=".")
+    ap.add_argument("--allow-origin", action="append", default=[], metavar="ORIGIN",
+                    help="another origin that may read /mpris.json, e.g. http://127.0.0.1:9875 (repeatable)")
     a = ap.parse_args()
+    ALLOWED.update(o.rstrip("/") for o in a.allow_origin)
     handler = functools.partial(Handler, directory=a.directory)
     with ThreadingHTTPServer((a.bind, a.port), handler) as httpd:
         print(f"serving {a.directory} on http://{a.bind}:{a.port}/ (+ /mpris.json)")
