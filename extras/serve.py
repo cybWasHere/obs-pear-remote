@@ -84,7 +84,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(_cache[1])
 
     def log_message(self, fmt, *args):
-        if not self.path.startswith("/mpris.json"):
+        if not getattr(self, "path", "").startswith("/mpris.json"):    # unset on a malformed request
             super().log_message(fmt, *args)
 
 
