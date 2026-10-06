@@ -166,6 +166,7 @@ Append them to the URL, e.g. `pear-remote.html?theme=midnight&amuse=0`.
 | `client` | `obs-pear-remote` | client name shown in Pear's authorize prompt |
 | `amuse` | `http://127.0.0.1:9863/query` | Amuse fallback; `0` turns it off |
 | `theme` | `ferra` | `ferra` or `midnight` |
+| `ambient` | the droplet button | `1` / `0` forces ambient mode on or off: the dock takes its colours from the current cover (background tint from the cover's main colour, buttons from its strongest other colour). Without it, the droplet button in the toolbar toggles it and is remembered |
 | `reload` | `1` | `0` stops the reload-on-change check |
 
 **now-playing.html**

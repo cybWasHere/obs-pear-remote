@@ -10,7 +10,8 @@
      optional read-only fallback until Pear reports its first song.
      Options: ?api=http://127.0.0.1:26538 (API Server address), &client=obs-pear-remote (name
      shown in Pear's authorize prompt), &amuse=http://127.0.0.1:9863/query (0 = off),
-     &theme=ferra|midnight, &reload=0 (don't reload when this file changes on disk) -->
+     &theme=ferra|midnight, &ambient=1|0 (colours from the current cover; without it the droplet
+     button in the toolbar decides and is remembered), &reload=0 (don't reload when this file changes on disk) -->
 <style>
   /* themes: pick one with ?theme=, or copy a block, rename it and change the colours */
   :root, :root[data-theme="ferra"] {   /* Halloy's Ferra palette */
@@ -70,6 +71,9 @@
   #tabs .tab svg { width: 14px; height: 14px; }
   #tabs .tab:hover { color: var(--text); background: var(--surface); }
   #tabs .tab.on { color: var(--accent); background: var(--surface); }
+  #tabs #ambient { margin-left: 6px; }
+  /* ambient mode: a wash of the cover's colour behind the player */
+  #player { background-image: radial-gradient(130% 100% at 0 0, var(--glow, transparent), transparent 75%); }
   #tabLabel { margin-left: auto; color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; }
 
   #search { display: none; flex: 1; margin-left: 4px; }
@@ -98,7 +102,7 @@
   @media (min-aspect-ratio: 4/3) and (min-width: 560px) {
     body { flex-direction: row; }
     #player { width: 340px; display: flex; flex-direction: column; justify-content: center;
-              border-right: 1px solid var(--line); background: var(--surface); }
+              border-right: 1px solid var(--line); background-color: var(--surface); }
     #cover { width: 84px; height: 84px; }
   }
   /* very short dock: tighten the player */
@@ -149,6 +153,7 @@
   <button id="tabSearch" class="tab" title="Search"><svg viewBox="0 0 24 24"><path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5Zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9Z"/></svg></button>
   <div id="search"><input id="q" placeholder="search, Enter…" autocomplete="off"></div>
   <span id="tabLabel">queue</span>
+  <button id="ambient" class="tab" title="Ambient: colours from the cover"><svg viewBox="0 0 24 24"><path d="M12 2.5S5.5 9.6 5.5 14.5a6.5 6.5 0 0 0 13 0C18.5 9.6 12 2.5 12 2.5Zm0 16.5a4.5 4.5 0 0 1-4.5-4.5c0-.6.1-1.2.4-1.9.9 1.6 2.9 2.4 6.1 2.4h2.4A4.5 4.5 0 0 1 12 19Z"/></svg></button>
 </div>
 <div id="list"></div>
 </div>
@@ -207,7 +212,110 @@ function renderSong() {
   $("title").textContent = s ? s.title : "—";
   $("artist").textContent = s ? [s.artist, s.album].filter(Boolean).join(" · ") : "";
   if (s && s.imageSrc && $("cover").src !== s.imageSrc) $("cover").src = s.imageSrc;
+  ambient(s && s.imageSrc);
   $("dur").textContent = fmt(s && s.songDuration);
+}
+
+// ---- ambient: theme colours from the cover ----
+// Colours are built in OKLCH: hue (and how much colour) from the cover, lightness fixed per
+// role, so text stays readable whatever the cover looks like. --coral and --red keep the theme's.
+const ROLES = { "--bg": [.25, .032], "--surface": [.29, .038], "--sunken": [.215, .028], "--line": [.36, .04],
+                "--line2": [.44, .045], "--row-cur": [.39, .06], "--text": [.91, .045], "--muted": [.71, .06],
+                "--dim": [.52, .045] };
+const root = document.documentElement;
+let ambientOn = P.has("ambient") ? P.get("ambient") !== "0" : localStorage.getItem("ambient") === "1";
+let ambientSrc = null;
+
+function oklab(r, g, b) {
+  [r, g, b] = [r, g, b].map(c => (c /= 255) <= .04045 ? c / 12.92 : ((c + .055) / 1.055) ** 2.4);
+  const l = Math.cbrt(.4122214708 * r + .5363325363 * g + .0514459929 * b),
+        m = Math.cbrt(.2119034982 * r + .6806995451 * g + .1073969566 * b),
+        s = Math.cbrt(.0883024619 * r + .2817188376 * g + .6299787005 * b);
+  return [.2104542553 * l + .793617785 * m - .0040720468 * s,
+          1.9779984951 * l - 2.428592205 * m + .4505937099 * s,
+          .0259040371 * l + .7827717662 * m - .808675766 * s];
+}
+
+function oklchHex(L, C, h, alpha = "") {
+  for (; ; C -= .005) {   // out of sRGB: give up colour, not lightness
+    const a = C * Math.cos(h), b = C * Math.sin(h);
+    const l = (L + .3963377774 * a + .2158037573 * b) ** 3, m = (L - .1055613458 * a - .0638541728 * b) ** 3,
+          s = (L - .0894841775 * a - 1.291485548 * b) ** 3;
+    const rgb = [4.0767416621 * l - 3.3077115913 * m + .2309699292 * s,
+                 -1.2684380046 * l + 2.6097574011 * m - .3413193965 * s,
+                 -.0041960863 * l - .7034186147 * m + 1.707614701 * s];
+    if (C > 0 && rgb.some(c => c < -.001 || c > 1.001)) continue;
+    return "#" + rgb.map(c => {
+      c = Math.max(0, Math.min(1, c));
+      c = c <= .0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - .055;
+      return Math.round(c * 255).toString(16).padStart(2, "0");
+    }).join("") + alpha;
+  }
+}
+
+// main = the hue covering the most of the cover (tints the whole dock); accent = the strongest
+// other hue if there is one, so a blue cover with an orange sun gets orange buttons
+function coverPalette(img) {
+  const N = 32, BINS = 36, cv = document.createElement("canvas");
+  cv.width = cv.height = N;
+  const cx = cv.getContext("2d", { willReadFrequently: true });
+  cx.drawImage(img, 0, 0, N, N);
+  const px = cx.getImageData(0, 0, N, N).data;   // throws if the image host sent no CORS header
+  const bins = Array.from({ length: BINS }, () => ({ w: 0, x: 0, y: 0, n: 0 }));
+  let total = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    const [, a, b] = oklab(px[i], px[i + 1], px[i + 2]), c = Math.hypot(a, b);
+    total += c;
+    if (c < .02) continue;   // greys have no hue worth counting
+    const bin = bins[Math.floor(((Math.atan2(b, a) / (2 * Math.PI) + 1) % 1) * BINS) % BINS];
+    bin.w += c; bin.x += a; bin.y += b; bin.n++;
+  }
+  const near = (i, d) => bins[(i + d + BINS) % BINS];
+  const score = i => near(i, -1).w / 2 + bins[i].w + near(i, 1).w / 2;
+  const pick = ok => bins.map((_, i) => i).filter(ok).sort((p, q) => score(q) - score(p))[0];
+  const hue = i => Math.atan2(near(i, -1).y + bins[i].y + near(i, 1).y, near(i, -1).x + bins[i].x + near(i, 1).x);
+  const chroma = i => { const n = near(i, -1).n + bins[i].n + near(i, 1).n; return n ? score(i) / n : 0; };
+  const main = pick(() => true);
+  if (!score(main)) return { h: 0, k: 0, ah: 0, ak: 0 };   // black and white cover
+  const far = i => Math.min(Math.abs(i - main), BINS - Math.abs(i - main)) >= 6;   // 60° away
+  const alt = pick(i => far(i) && score(i) > score(main) * .15 && chroma(i) > .05);
+  const acc = alt ?? main;
+  return { h: hue(main), k: Math.min(1, total / (N * N) / .045), ah: hue(acc), ak: Math.min(1, chroma(acc) / .09) };
+}
+
+function ambient(src) {
+  if (!ambientOn) src = null;
+  if (src === ambientSrc) return;
+  ambientSrc = src;
+  const clear = () => [...Object.keys(ROLES), "--accent", "--accent-hi", "--glow"].forEach(v => root.style.removeProperty(v));
+  if (!src) return clear();
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.onload = () => {
+    if (src !== ambientSrc) return;
+    let p;
+    try { p = coverPalette(img); } catch (e) { console.warn("[ambient]", e.message); return clear(); }
+    for (const [v, [L, C]] of Object.entries(ROLES)) root.style.setProperty(v, oklchHex(L, C * p.k, p.h));
+    const tint = p.ak ? 1 : 0;   // a black and white cover gets grey buttons too
+    root.style.setProperty("--accent", oklchHex(.82, tint * (.04 + .09 * p.ak), p.ah));
+    root.style.setProperty("--accent-hi", oklchHex(.88, tint * (.03 + .07 * p.ak), p.ah));
+    root.style.setProperty("--glow", oklchHex(.45, .11 * p.k, p.h, "66"));
+  };
+  img.onerror = () => { if (src === ambientSrc) clear(); };
+  img.src = src;
+}
+
+function setAmbient(on) {
+  ambientOn = on;
+  $("ambient").classList.toggle("on", on);
+  ambient(st.song && st.song.imageSrc);
+}
+
+// registered as colours so they can fade from one cover to the next
+if (window.CSS && CSS.registerProperty) {
+  const vars = [...Object.keys(ROLES), "--accent", "--accent-hi", "--glow"];
+  for (const name of vars) CSS.registerProperty({ name, syntax: "<color>", inherits: true, initialValue: "transparent" });
+  root.style.transition = vars.map(v => `${v} .9s ease`).join(", ");
 }
 
 function renderControls() {
@@ -514,6 +622,7 @@ function setTab(t) {
 $("tabQueue").onclick = () => setTab("queue");
 $("tabMixes").onclick = () => setTab("mixes");
 $("tabSearch").onclick = () => setTab("search");
+$("ambient").onclick = () => { setAmbient(!ambientOn); localStorage.setItem("ambient", ambientOn ? "1" : "0"); };
 $("q").onkeydown = async e => {
   if (e.key !== "Enter" || !e.target.value.trim()) return;
   status("searching…");
@@ -535,6 +644,7 @@ if (P.get("reload") !== "0") setInterval(async () => {
 }, 4000);
 
 renderList();
+setAmbient(ambientOn);
 connect();
 if (AMUSE) { amuseFallback(); setInterval(amuseFallback, 3000); }
 setInterval(loadQueue, 30000);
