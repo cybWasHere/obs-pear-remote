@@ -88,7 +88,8 @@ py -m http.server 9870 --bind 127.0.0.1 --directory C:\path\to\obs-pear-remote  
 **At login:**
 
 - **Linux**: `extras/obs-pear-remote.service` is a systemd user unit that runs `serve.py`. Copy it
-  to `~/.config/systemd/user/`, fix the `--directory` path if you cloned elsewhere, then
+  to `~/.config/systemd/user/` (if you cloned somewhere other than `~/obs-pear-remote`, fix both
+  paths on its `ExecStart` line), then
   `systemctl --user enable --now obs-pear-remote`.
 - **Windows**: put a shortcut to `extras\start-server.cmd` in the Startup folder (Win+R,
   `shell:startup`) and set the shortcut to *Run: Minimized*.
