@@ -8,6 +8,8 @@
      Docks > Custom Browser Docks, URL http://127.0.0.1:9870/pear-remote.html
      Needs Pear's Plugins > API Server (live state over its websocket); Plugins > Amuse is an
      optional read-only fallback until Pear reports its first song.
+     The Radio tab plays internet radio through mpv; it needs extras/serve.py as the server
+     (stations: radios.json).
      Options: ?api=http://127.0.0.1:26538 (API Server address), &client=obs-pear-remote (name
      shown in Pear's authorize prompt), &amuse=http://127.0.0.1:9863/query (0 = off),
      &theme=ferra|midnight, &ambient=1|0 (colours from the current cover; without it the droplet
@@ -98,6 +100,7 @@
   .item .acts button { padding: 3px 5px; border-radius: 4px; color: var(--muted); font-size: 11px; }
   .item .acts button:hover { background: var(--sunken); color: var(--text); }
   .empty { color: var(--dim); text-align: center; padding: 20px; }
+  .group { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; padding: 8px 8px 2px; }
   /* wide dock (wider than tall): player on the left, queue / search filling the right */
   @media (min-aspect-ratio: 4/3) and (min-width: 560px) {
     body { flex-direction: row; }
@@ -150,6 +153,7 @@
 <div id="tabs">
   <button id="tabQueue" class="tab on" title="Queue"><svg viewBox="0 0 24 24"><path d="M3 6h13v2H3zm0 5h13v2H3zm0 5h9v2H3zm15-1.2V8h4v2h-2v7a3 3 0 1 1-2-2.2Z"/></svg></button>
   <button id="tabMixes" class="tab" title="Mixed for you"><svg viewBox="0 0 24 24"><path d="M4 4h7v7H4zm9 0h7v7h-7zM4 13h7v7H4zm9 0h7v7h-7z"/></svg></button>
+  <button id="tabRadio" class="tab" title="Radio"><svg viewBox="0 0 24 24"><path d="M3.2 6.1A2 2 0 0 0 2 8v12c0 1.1.9 2 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8.3l8.3-3.3L15.9 1 3.2 6.1ZM7 20a3 3 0 1 1 0-6 3 3 0 0 1 0 6Zm13-8h-2v-2h-2v2H4V8h16v4Z"/></svg></button>
   <button id="tabSearch" class="tab" title="Search"><svg viewBox="0 0 24 24"><path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5Zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9Z"/></svg></button>
   <div id="search"><input id="q" placeholder="search, Enter…" autocomplete="off"></div>
   <span id="tabLabel">queue</span>
@@ -168,7 +172,9 @@ const $ = id => document.getElementById(id);
 let token = null;
 const st = { song: null, playing: false, position: 0, posAt: 0, volume: null, muted: false,
              repeat: "NONE", shuffle: false, like: null, queue: [], tab: "queue", results: [],
-             mixes: [], mixesNote: "loading…" };
+             mixes: [], mixesNote: "loading…",
+             radio: { available: false, playing: null, title: "", volume: 100, muted: false, stations: [] },
+             radioNote: "loading…" };
 
 // ---- api ----
 // every /auth request can pop Pear's authorize prompt, so share one request between callers
@@ -208,6 +214,15 @@ const fmt = s => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s /
 const livePos = () => st.position + (st.playing ? (performance.now() - st.posAt) / 1000 : 0);
 
 function renderSong() {
+  const r = onAir();
+  if (r) {   // the radio owns the player while it is on
+    $("title").textContent = r.name;
+    $("artist").textContent = st.radio.title || r.note;
+    if ($("cover").src !== tile(r)) $("cover").src = tile(r);
+    ambient(tile(r));
+    $("dur").textContent = "";
+    return;
+  }
   const s = st.song;
   $("title").textContent = s ? s.title : "—";
   $("artist").textContent = s ? [s.artist, s.album].filter(Boolean).join(" · ") : "";
@@ -319,20 +334,29 @@ if (window.CSS && CSS.registerProperty) {
 }
 
 function renderControls() {
-  $("playIcon").setAttribute("d", st.playing ? "M6 5h4v14H6zm8 0h4v14h-4z" : "M8 5v14l11-7z");
+  const radio = !!onAir();
+  $("playIcon").setAttribute("d", radio ? "M6 6h12v12H6z" : st.playing ? "M6 5h4v14H6zm8 0h4v14h-4z" : "M8 5v14l11-7z");
+  $("play").title = radio ? "Stop the radio" : "Play / pause";
+  $("prev").title = radio ? "Previous station" : "Previous";
+  $("next").title = radio ? "Next station" : "Next";
   $("shuffle").classList.toggle("on", st.shuffle);
   $("repeat").classList.toggle("on", st.repeat !== "NONE");
   $("repeatTag").textContent = st.repeat === "ONE" ? "1" : "";
   $("like").classList.toggle("on", st.like === "LIKE");
   $("dislike").classList.toggle("on", st.like === "DISLIKE");
-  $("mute").classList.toggle("on", st.muted);
-  $("muteIcon").setAttribute("d", st.muted
+  const muted = radio ? st.radio.muted : st.muted, volume = radio ? st.radio.volume : st.volume;
+  $("mute").classList.toggle("on", muted);
+  $("muteIcon").setAttribute("d", muted
     ? "M16.5 12A4.5 4.5 0 0 0 14 8v2.2l2.5 2.4V12ZM19 12c0 .9-.2 1.8-.5 2.6l1.5 1.5A8.8 8.8 0 0 0 21 12c0-4.3-3-7.9-7-8.8v2.1c2.9.9 5 3.5 5 6.7ZM4.3 3 3 4.3 7.7 9H3v6h4l5 5v-6.7l4.3 4.2c-.7.5-1.4.9-2.3 1.2v2A9 9 0 0 0 17.7 19l2 2 1.3-1.3-9-9L4.3 3ZM12 4 9.9 6.1 12 8.2V4Z"
     : "M3 9v6h4l5 5V4L7 9H3Zm13.5 3A4.5 4.5 0 0 0 14 8v8c1.5-.7 2.5-2.2 2.5-4Z");
-  if (st.volume != null && document.activeElement !== $("vol")) $("vol").value = st.volume;
+  if (volume != null && document.activeElement !== $("vol")) $("vol").value = volume;
 }
 
 function tick() {
+  if (onAir()) {
+    $("pos").textContent = "live"; $("fill").style.width = "0";
+    return requestAnimationFrame(tick);
+  }
   const d = st.song ? st.song.songDuration : 0;
   const p = Math.min(livePos(), d || Infinity);
   $("pos").textContent = fmt(p);
@@ -381,6 +405,20 @@ function renderList() {
       el.addEventListener("mouseenter", () => firstSong(m));
       list.append(el);
     }
+  } else if (st.tab === "radio") {
+    if (!st.radio.stations.length) { list.innerHTML = `<div class="empty"></div>`; list.firstChild.textContent = st.radioNote; return; }
+    let group = null;
+    for (const r of st.radio.stations) {
+      if (r.group !== group) {
+        const h = document.createElement("div");
+        h.className = "group"; h.textContent = group = r.group;
+        list.append(h);
+      }
+      const on = r.id === st.radio.playing;
+      list.append(row(tile(r), r.name, on && st.radio.title || r.note, on ? "cur" : "",
+        () => on ? radio({ stop: true }) : playRadio(r)));
+    }
+    list.scrollTop = top;
   } else {
     if (!st.results.length) { list.innerHTML = `<div class="empty">type something and press Enter</div>`; return; }
     for (const r of st.results) list.append(row(r.thumb, r.title, r.sub, "",
@@ -459,6 +497,63 @@ async function addMix(m, where, andPlay) {
   }
   log("queue never grew; still", n);
   status(`${m.title}: Pear accepted it but queued nothing (queue ${before} → ${n}); is Pear patched? (extras/pear-mixes)`, true);
+}
+
+// ---- radio ----
+// extras/serve.py plays the stations of radios.json through one mpv; this page only asks for a
+// station by id and polls what is on, so the OBS dock and any other open remote stay in step.
+const onAir = () => st.radio.playing && st.radio.stations.find(r => r.id === st.radio.playing);
+
+// stations have no artwork: a tile with the name's initials, in a colour that is the station's own
+const tiles = {};
+function tile(r) {
+  if (tiles[r.id]) return tiles[r.id];
+  let h = 0;
+  for (const c of r.name) h = (h * 31 + c.charCodeAt(0)) % 360;
+  const words = r.name.replace(/[^\p{L}\p{N} ]/gu, "").split(" ").filter(Boolean);
+  const text = (words.length > 1 ? words.slice(0, 3).map(w => w[0]).join("") : r.name.slice(0, 2)).toUpperCase();
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="hsl(${h} 45% 32%)"/>`
+    + `<circle cx="64" cy="0" r="40" fill="hsl(${(h + 40) % 360} 60% 48%)" opacity=".55"/>`
+    + `<text x="32" y="41" text-anchor="middle" font-family="sans-serif" font-weight="700" `
+    + `font-size="${text.length > 2 ? 20 : 24}" fill="hsl(${h} 60% 92%)">${text}</text></svg>`;
+  return tiles[r.id] = "data:image/svg+xml," + encodeURIComponent(svg);
+}
+
+let radioAt = 0;   // when this page last started a station
+let radioSeen = "";
+function applyRadio(d) {
+  const seen = JSON.stringify(d);
+  if (seen === radioSeen) return;   // polled every few seconds; mostly nothing has changed
+  radioSeen = seen;
+  st.radio = d;
+  st.radioNote = d.available ? "no stations in radios.json" : "the radio needs mpv installed";
+  renderSong(); renderControls();
+  if (st.tab === "radio") renderList();
+}
+
+async function loadRadio() {
+  try { applyRadio(await (await fetch("/radio.json", { cache: "no-store" })).json()); }
+  catch { st.radioNote = "the radio needs extras/serve.py as this page's server"; if (st.tab === "radio") renderList(); }
+}
+
+async function radio(body) {
+  try {
+    const r = await fetch("/radio", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error("radio " + r.status);
+    applyRadio(await r.json());
+  } catch (e) { status(e.message, true); }
+}
+
+async function playRadio(r) {
+  radioAt = performance.now();
+  if (st.playing) { st.playing = false; act("pause"); }   // one thing plays at a time
+  await radio({ play: r.id });
+  status(`radio: ${r.name}`);
+}
+
+function stepRadio(by) {
+  const all = st.radio.stations, i = all.findIndex(r => r.id === st.radio.playing);
+  playRadio(all[(i + by + all.length) % all.length]);
 }
 
 // ---- youtube music data ----
@@ -566,7 +661,12 @@ function apply(m) {
     st.song = m.song; renderSong();
     if (changed) { loadLike(); loadQueue(); }
   }
-  if ("isPlaying" in m) st.playing = m.isPlaying;
+  if ("isPlaying" in m) {
+    st.playing = m.isPlaying;
+    // Pear started playing (from here, its own window, a media key): the radio gives way. Not in
+    // the first moments after a station starts, when Pear's last "playing" can still be in flight
+    if (m.isPlaying && st.radio.playing && performance.now() - radioAt > 1500) radio({ stop: true });
+  }
   if ("position" in m) { st.position = m.position; st.posAt = performance.now(); }
   if ("volume" in m && m.volume != null) st.volume = m.volume;
   if ("muted" in m) st.muted = m.muted;
@@ -618,17 +718,23 @@ async function amuseFallback() {
 }
 
 // ---- controls ----
-$("play").onclick = () => { st.playing = !st.playing; renderControls(); act("toggle-play"); };
-$("next").onclick = () => act("next");
-$("prev").onclick = () => act("previous");
+$("play").onclick = () => {
+  if (onAir()) return radio({ stop: true });
+  st.playing = !st.playing; renderControls(); act("toggle-play");
+};
+$("next").onclick = () => onAir() ? stepRadio(1) : act("next");
+$("prev").onclick = () => onAir() ? stepRadio(-1) : act("previous");
 $("like").onclick = () => act("like").then(() => setTimeout(loadLike, 300));
 $("dislike").onclick = () => act("dislike").then(() => setTimeout(loadLike, 300));
 $("shuffle").onclick = () => act("shuffle").then(() => setTimeout(loadQueue, 800));
 $("repeat").onclick = () => act("switch-repeat", { iteration: 1 });
-$("mute").onclick = () => act("toggle-mute");
-$("vol").oninput = e => { st.volume = +e.target.value; act("volume", { volume: st.volume }); };
+$("mute").onclick = () => onAir() ? radio({ muted: !st.radio.muted }) : act("toggle-mute");
+$("vol").oninput = e => {
+  if (onAir()) return radio({ volume: st.radio.volume = +e.target.value });
+  st.volume = +e.target.value; act("volume", { volume: st.volume });
+};
 $("bar").onclick = e => {
-  if (!st.song || !st.song.songDuration) return;
+  if (onAir() || !st.song || !st.song.songDuration) return;
   const r = $("track").getBoundingClientRect();
   const s = Math.round(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * st.song.songDuration);
   st.position = s; st.posAt = performance.now();
@@ -639,14 +745,16 @@ function setTab(t) {
   st.tab = t; centred = null;
   $("tabQueue").classList.toggle("on", t === "queue");
   $("tabMixes").classList.toggle("on", t === "mixes");
+  $("tabRadio").classList.toggle("on", t === "radio");
   $("tabSearch").classList.toggle("on", t === "search");
   $("search").classList.toggle("on", t === "search");
   $("tabLabel").textContent = t === "search" ? "" : t;
-  if (t === "search") $("q").focus(); else if (t === "mixes") loadMixes(); else loadQueue();
+  if (t === "search") $("q").focus(); else if (t === "mixes") loadMixes(); else if (t === "radio") loadRadio(); else loadQueue();
   renderList();
 }
 $("tabQueue").onclick = () => setTab("queue");
 $("tabMixes").onclick = () => setTab("mixes");
+$("tabRadio").onclick = () => setTab("radio");
 $("tabSearch").onclick = () => setTab("search");
 $("ambient").onclick = () => { setAmbient(!ambientOn); localStorage.setItem("ambient", ambientOn ? "1" : "0"); };
 $("q").onkeydown = async e => {
@@ -674,6 +782,7 @@ setAmbient(ambientOn);
 connect();
 if (AMUSE) { amuseFallback(); setInterval(amuseFallback, 3000); }
 setInterval(loadQueue, 30000);
+loadRadio(); setInterval(loadRadio, 4000);
 requestAnimationFrame(tick);
 </script>
 </body>

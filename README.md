@@ -24,7 +24,8 @@ Two HTML files. No build, no plugin, nothing to install but Python.
 volume and mute, like/dislike, shuffle and repeat. It shows the live queue (click a song to jump to
 it, ✕ to remove it) and has a search box whose results you can play now, play next or add to the
 end. With an optional [Pear patch](#mixed-for-you-optional-pear-patch), a third tab lists your
-personal *Mixed for you* shelf (My Supermix, Discover Mix, My Mix 01…) and plays those too. When
+personal *Mixed for you* shelf (My Supermix, Discover Mix, My Mix 01…) and plays those too. A
+[Radio](#radio) tab plays internet radio stations. When
 the dock is wider than it is tall, it switches to a side-by-side layout.
 
 **Now Playing** (`now-playing.html`, a browser source): cover, title and artist. Long titles
@@ -110,6 +111,26 @@ py -m http.server 9870 --bind 127.0.0.1 --directory C:\path\to\obs-pear-remote  
   websocket, so those buttons work but never light up. And while a mix or radio plays, adding to
   the queue silently does nothing: Pear sends YouTube the current queue's context, and YouTube then
   returns no songs. The [Pear patch](#mixed-for-you-optional-pear-patch) fixes that as well.
+
+## Radio
+
+The Radio tab lists the stations in `radios.json`: the main French ones (franceinfo, France Inter,
+BFM, RTL, TSF Jazz, FIP and its webradios…) and a handful of internet stations worth knowing (Radio
+Meuh, NTS, LYL, Kiosk, dublab, WFMU, Nightwave Plaza, SomaFM…). Click one to play it, click it again
+(or the big button) to stop.
+
+Pear can't play a stream, so `extras/serve.py` does, through [mpv](https://mpv.io): the tab needs
+`serve.py` as the server (not plain `http.server`) and `mpv` on the `PATH`. Tested on Linux.
+
+- While a station is on, the player shows it: the track title when the station sends one,
+  previous / next step through the stations, and volume and mute act on the radio, not on Pear.
+- One thing plays at a time: starting a station pauses Pear, and playing anything in Pear stops
+  the radio.
+- The radio belongs to the server, so every open remote shows the same station, and it keeps
+  playing if you close OBS. It stops when the server does.
+- To add a station, add a line to `radios.json` (`id`, `group`, `name`, `note`, `url` of the audio
+  stream itself, not of a web player). No restart needed. Pages can only ask for a station by
+  `id`, never hand mpv a URL.
 
 ## Mixed for you (optional Pear patch)
 
