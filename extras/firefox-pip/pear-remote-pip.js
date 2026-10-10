@@ -107,8 +107,9 @@
         if (here()) {
           const actor = content.windowGlobalChild.getActor("PictureInPictureLauncher");
           const video = actor.findVideoToPiP(content.document);
-          // a stream's element is there before its picture is; the window would open with no shape
-          if (video && (!twitch || video.videoWidth || video.isCloningElementVisually)) {
+          // the element is there before its picture is; the window would open with no shape (seen:
+          // 360 px wide, 16384 tall, and black)
+          if (video && (video.videoWidth && video.videoHeight || video.isCloningElementVisually)) {
             // the window takes a moment to open: asking twice in that moment would open two
             if (!video.isCloningElementVisually) {
               // the window takes a moment to open: asking twice in that moment would open two.
