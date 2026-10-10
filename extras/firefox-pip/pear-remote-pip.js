@@ -92,7 +92,7 @@
   // a click on a thumbnail does: the page changes without a load, so the <video> element (and a
   // PiP window on it) survives. Then put that element in Picture-in-Picture as soon as there is
   // one to put, by the same call as the keyboard shortcut.
-  const inPage = (kind, id, go, latest) => {
+  const inPage = (kind, id, go, latest, ext, asked) => {
     const { setTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
     const twitch = kind == "twitch";
     // the click was on the remote, not in this page: without it Firefox lets a new tab play muted at best
@@ -116,8 +116,10 @@
       if (at.protocol == "moz-extension:") return new RegExp("[?&]channel=" + id + "(&|$)", "i").test(at.search); // the extension's player
       return at.pathname.replace(/\/$/, "").toLowerCase() == "/" + id;
     };
-    const until = Date.now() + 20000;
-    let stuck = 0, asked = 0;
+    // a stream can take long to show: the Twitch extension sits out an ad (half a minute, at
+    // times more) with no picture at all
+    const until = Date.now() + (twitch ? 90000 : 20000);
+    let stuck = 0;
     const pip = () => {
       if (!latest()) return; // run again for this tab: two of these would open two windows
       try {
@@ -129,6 +131,14 @@
         if (here()) {
           const actor = content.windowGlobalChild.getActor("PictureInPictureLauncher");
           const video = actor.findVideoToPiP(content.document);
+          // The extension's player, stopped (its page says so: states 7 and 8): by quiet() when
+          // something else took over, or by itself when Firefox refused its first try to play.
+          // Its button starts it again, live. Not pressed twice within its start
+          if (video && video.paused && content.location.protocol == "moz-extension:"
+              && ["7", "8"].includes(content.document.body.getAttribute(ext[1])) && Date.now() - stuck > 3000) {
+            stuck = Date.now();
+            content.document.getElementById(ext[0])?.click();
+          }
           // the element is there before its picture is; the window would open with no shape (seen:
           // 360 px wide, 16384 tall, and black)
           if (video && (video.videoWidth && video.videoHeight || video.isCloningElementVisually)) {
@@ -136,8 +146,8 @@
             if (!video.isCloningElementVisually) {
               // the window takes a moment to open: asking twice in that moment would open two.
               // And one asked for while a stream changes channel may not come: ask again then
-              if (Date.now() - asked > 3000) {
-                asked = Date.now();
+              if (Date.now() - asked() > 3000) {
+                asked(Date.now());
                 actor.togglePictureInPicture({ video, reason: "Shortcut" });
               }
             } else if (!twitch) {
@@ -147,6 +157,10 @@
               // a stream that was paused in this tab stays paused, on the next channel too: when
               // Twitch's own button has said "paused" for a while, press it
               if (!video.paused) return;
+              if (content.location.protocol == "moz-extension:") { // see above; nothing of Twitch's to press here
+                if (Date.now() < until) setTimeout(pip, 100);
+                return;
+              }
               const button = content.document.querySelector('[data-a-target="player-play-pause-button"]');
               if (button && button.getAttribute("data-a-player-state") != "paused") stuck = 0;
               else if (!stuck) stuck = Date.now();
@@ -163,8 +177,22 @@
     "data:application/javascript;charset=utf-8," + encodeURIComponent(code), false, true); // true: in the tab's one global
   let runs = 0; // frame scripts of one tab share their global: the latest run leaves its number there
   const run = (browser, kind, id, go) => frame(browser, `this.pearRemoteRun = ${++runs};
-    (${inPage})(${JSON.stringify(kind)}, ${JSON.stringify(id)}, ${go}, () => this.pearRemoteRun === ${runs})`);
-  const quiet = browser => frame(browser, `for (const v of content.document.querySelectorAll("video")) v.pause()`);
+    (${inPage})(${JSON.stringify(kind)}, ${JSON.stringify(id)}, ${go}, () => this.pearRemoteRun === ${runs},
+      ${JSON.stringify([EXT_STOP, EXT_STATE])},
+      at => at ? this.pearRemoteAsked = at : this.pearRemoteAsked || 0)`); // when a window was last asked for, here
+  // Pause what plays in a tab. The Twitch extension's player starts its video again when the
+  // element is paused; it stops by its own button (the one Space presses), which is pressed
+  // unless its page says it has stopped already (states 7 and 8). After that a pause holds.
+  const EXT_STOP = "переключитьтрансляцию", EXT_STATE = "data-состояние"; // the button's id, <body>'s attribute
+  const quiet = browser => frame(browser, `{
+    const pause = () => { for (const v of content.document.querySelectorAll("video")) v.pause(); };
+    const button = content.location.protocol == "moz-extension:" && content.document.getElementById(${JSON.stringify(EXT_STOP)});
+    if (button && !["7", "8"].includes(content.document.body.getAttribute(${JSON.stringify(EXT_STATE)}))) {
+      button.click();
+      ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs").setTimeout(pause, 800);
+    }
+    pause();
+  }`);
   // Close a Picture-in-Picture window as its own ✕ does: the video pauses and goes back to its tab.
   const shut = win => {
     const browser = pipBrowser(win);
@@ -229,6 +257,8 @@
     // while its video is in Picture-in-Picture; say so a moment early
     const show = () => { if (kind == "twitch" && !tab.selected) try { browser.docShellIsActive = true; } catch (e) {} };
     show();
+    let spec = null; // the address the page was at when the work in it was last started
+    const start = go => { spec = browser.currentURI.spec; run(browser, kind, id, go); };
     let there = false;
     const player = kind == "twitch" && !fresh && site.at(browser) !== id && playerOf(browser);
     if (player) {
@@ -238,7 +268,7 @@
       browser.fixupAndLoadURIString(url, { triggeringPrincipal: system });
     } else if (!fresh) {
       const title = browser.contentTitle, moving = site.at(browser) !== id;
-      run(browser, kind, id, moving);
+      start(moving);
       there = await arrived(30);
       // Twitch's address moves at once, whether its router followed or not; its title tells
       if (there && moving && kind == "twitch") {
@@ -250,13 +280,13 @@
     if (!there) {
       if (!(await arrived(150)) || mine !== job) return;
       show(); // again: a new address can be a new process
-      run(browser, kind, id, false);
+      start(false);
     }
     // a tab that was never in front holds its video back: a new one, or one Firefox brought back
     // with the last session. Let it go once Firefox has caught it
     // Meanwhile a channel's tab may be sent on to the extension's player: another address, in
     // another process, where what was started in the page is gone. Start it again there
-    let spec = browser.currentURI.spec, held = true;
+    let held = true, again = -1;
     for (let i = 0; i < (fresh || kind == "twitch" ? 150 : 50) && mine === job && !tab.closing; i++) {
       if (held && tab.activeMediaBlocked) {
         tab.resumeDelayedMedia();
@@ -264,10 +294,17 @@
         if (kind != "twitch") return;
       }
       if (kind == "twitch" && browser.currentURI.spec !== spec && site.at(browser) === id) {
-        spec = browser.currentURI.spec;
+        // a window opened on the page the tab just left, for the other kind of page, is left
+        // behind showing nothing: close it, or there would be two
+        if (spec && spec.split(":")[0] != browser.currentURI.scheme) {
+          for (const w of pipWindows()) if (pipBrowser(w) === browser) w.close();
+        }
         show();
-        run(browser, kind, id, false);
+        start(false);
+        again = i + 8;
       }
+      // and once more a moment later: what is sent to a tab while it changes process can be lost
+      if (i === again && site.at(browser) === id) start(false);
       await sleep(100);
     }
   }
