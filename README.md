@@ -213,6 +213,9 @@ again to refresh it.
   the window back to the tab, where the stream plays on, keeps the chat. Another channel moves
   the chat there. A Chatterino you started yourself is left alone, both ways: no second one is
   opened, and yours is never closed. `--no-twitch-chat` turns this off.
+- **With the extension "Alternate Player for Twitch.tv"** (it plays streams without Twitch's ads,
+  on a page of its own) all of this works the same on its player. A broadcast it can't play
+  ("this broadcast is encrypted") opens in Twitch's own player instead.
 - **One thing plays at a time** here too: a stream with sound and music take turns, as in
   [YouTube](#youtube). Music starting pauses the stream and closes its window, and so Chatterino.
 

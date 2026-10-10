@@ -39,9 +39,22 @@
   };
   const NOT_CHANNELS = ["directory", "videos", "settings", "search", "downloads", "subscriptions", "inventory",
                         "drops", "wallet", "friends", "turbo", "jobs", "store", "prime", "login", "signup", "following"];
+  // The extension "Alternate Player for Twitch.tv" sends a channel's tab to a page of its own,
+  // moz-extension://<id>/player.html?channel=<name>. Its address without the channel, or null:
+  const playerOf = browser => {
+    try {
+      const uri = browser.currentURI;
+      if (uri.schemeIs("moz-extension") && uri.filePath == "/player.html" && /(?:^|&)channel=\w/.test(uri.query)) {
+        return uri.prePath + uri.filePath;
+      }
+    } catch (e) {}
+    return null;
+  };
   const channelOf = browser => {
     try {
-      const uri = browser.currentURI, name = /^\/(\w{2,25})\/?$/.exec(uri.filePath)?.[1].toLowerCase();
+      const uri = browser.currentURI;
+      if (playerOf(browser)) return /(?:^|&)channel=(\w{2,25})(?:&|$)/.exec(uri.query)?.[1].toLowerCase() ?? null;
+      const name = /^\/(\w{2,25})\/?$/.exec(uri.filePath)?.[1].toLowerCase();
       if (/(^|\.)twitch\.tv$/.test(uri.host) && name && !NOT_CHANNELS.includes(name)) return name;
     } catch (e) {}
     return null; // not on a Twitch channel
@@ -97,13 +110,22 @@
         content.dispatchEvent(new content.PopStateEvent("popstate", { state: null }));
       }
     } catch (e) { Cu.reportError(e); }
-    const here = () => twitch ? content.location.pathname.replace(/\/$/, "").toLowerCase() == "/" + id
-                              : content.location.search.includes("v=" + id);
+    const here = () => {
+      const at = content.location;
+      if (!twitch) return at.search.includes("v=" + id);
+      if (at.protocol == "moz-extension:") return new RegExp("[?&]channel=" + id + "(&|$)", "i").test(at.search); // the extension's player
+      return at.pathname.replace(/\/$/, "").toLowerCase() == "/" + id;
+    };
     const until = Date.now() + 20000;
     let stuck = 0, asked = 0;
     const pip = () => {
       if (!latest()) return; // run again for this tab: two of these would open two windows
       try {
+        // The extension's player gives up on some channels ("this broadcast is encrypted") and
+        // shows its report page. Twitch's own player, then, at the address the extension leaves alone
+        if (twitch && content.location.protocol == "moz-extension:" && content.document.querySelector('iframe[src="report.html"]')) {
+          return content.location.replace("https://www.twitch.tv/" + id + "?twitch5=0");
+        }
         if (here()) {
           const actor = content.windowGlobalChild.getActor("PictureInPictureLauncher");
           const video = actor.findVideoToPiP(content.document);
@@ -208,7 +230,13 @@
     const show = () => { if (kind == "twitch" && !tab.selected) try { browser.docShellIsActive = true; } catch (e) {} };
     show();
     let there = false;
-    if (!fresh) {
+    const player = kind == "twitch" && !fresh && site.at(browser) !== id && playerOf(browser);
+    if (player) {
+      // the extension's player takes its channel from its address, and from nowhere else. Not
+      // given that address directly (every other time, its page then stayed empty): the
+      // channel's own, from which the extension brings the tab back to its player
+      browser.fixupAndLoadURIString(url, { triggeringPrincipal: system });
+    } else if (!fresh) {
       const title = browser.contentTitle, moving = site.at(browser) !== id;
       run(browser, kind, id, moving);
       there = await arrived(30);
@@ -226,8 +254,20 @@
     }
     // a tab that was never in front holds its video back: a new one, or one Firefox brought back
     // with the last session. Let it go once Firefox has caught it
-    for (let i = 0; i < (fresh ? 150 : 50) && mine === job && !tab.closing; i++) {
-      if (tab.activeMediaBlocked) return tab.resumeDelayedMedia();
+    // Meanwhile a channel's tab may be sent on to the extension's player: another address, in
+    // another process, where what was started in the page is gone. Start it again there
+    let spec = browser.currentURI.spec, held = true;
+    for (let i = 0; i < (fresh || kind == "twitch" ? 150 : 50) && mine === job && !tab.closing; i++) {
+      if (held && tab.activeMediaBlocked) {
+        tab.resumeDelayedMedia();
+        held = false;
+        if (kind != "twitch") return;
+      }
+      if (kind == "twitch" && browser.currentURI.spec !== spec && site.at(browser) === id) {
+        spec = browser.currentURI.spec;
+        show();
+        run(browser, kind, id, false);
+      }
       await sleep(100);
     }
   }

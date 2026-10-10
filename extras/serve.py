@@ -49,6 +49,7 @@ from urllib.parse import parse_qs, urlparse
 MPRIS_PATH, MPRIS_PLAYER = "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player"
 WATCH = re.compile(r"^https://(www\.|m\.)?youtube\.com/(watch|shorts/|live/)|^https://youtu\.be/")
 CHANNEL = re.compile(r"^https://(?:www\.|m\.)?twitch\.tv/(\w{2,25})/?(?:[?#]|$)")
+PLAYER = re.compile(r"^moz-extension://[^/]+/player\.html\?(?:[^#]*&)?channel=(\w{2,25})(?:[&#]|$)")
 NOT_CHANNELS = {"directory", "videos", "settings", "search", "downloads", "subscriptions", "inventory", "drops",
                 "wallet", "friends", "turbo", "jobs", "store", "prime", "login", "signup", "following"}
 _cache = (0.0, b"{}")
@@ -74,7 +75,10 @@ def video_id(url):
 def channel(url):
     """The Twitch channel a page is on, lower case; None for any other address."""
     m = CHANNEL.match(url)
-    return m.group(1).lower() if m and m.group(1).lower() not in NOT_CHANNELS else None
+    if m:
+        return m.group(1).lower() if m.group(1).lower() not in NOT_CHANNELS else None
+    m = PLAYER.match(url)    # the page the extension "Alternate Player for Twitch.tv" plays a channel on
+    return m.group(1).lower() if m else None
 
 
 def players():
