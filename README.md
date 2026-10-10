@@ -81,8 +81,9 @@ No git? *Code › Download ZIP* on GitHub works just as well.
 <br>
 
 `extras/serve.py` is Python's `http.server` plus a few endpoints: `/mpris.json`, which the card uses
-for the browser-video fallback (Linux only), and the ones behind the remote's Radio, Podcasts and
-YouTube tabs. Without those, the stock server does the rest:
+for the browser-video fallback (Linux only), the ones behind the remote's Radio, Podcasts and
+YouTube tabs, and `/now.json` (what the radio or the podcast is on, with `POST /now` to pause it),
+for a desktop widget of your own. Without those, the stock server does the rest:
 
 ```sh
 python3 -m http.server 9870 --bind 127.0.0.1 --directory obs-pear-remote          # Linux / macOS

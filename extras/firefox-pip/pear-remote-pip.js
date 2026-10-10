@@ -100,15 +100,20 @@
       browser = tab.linkedBrowser;
     }
     for (const w of pipWindows()) if (pipBrowser(w) && pipBrowser(w) !== browser) w.close(); // one window
+    let there = false;
     if (!fresh) {
       run(browser, id, videoOf(browser) !== id);
-      if (await arrived(30) || mine !== job) return;
-      browser.fixupAndLoadURIString(url, { triggeringPrincipal: system }); // YouTube didn't take it: a plain load
+      there = await arrived(30);
+      if (mine !== job) return;
+      if (!there) browser.fixupAndLoadURIString(url, { triggeringPrincipal: system }); // YouTube didn't take it: a plain load
     }
-    if (!(await arrived(150)) || mine !== job) return;
-    run(browser, id, false);
-    // a tab that was never in front holds its video back; let it go once Firefox has caught it
-    for (let i = 0; fresh && i < 150 && mine === job && !tab.closing; i++) {
+    if (!there) {
+      if (!(await arrived(150)) || mine !== job) return;
+      run(browser, id, false);
+    }
+    // a tab that was never in front holds its video back: a new one, or one Firefox brought back
+    // with the last session. Let it go once Firefox has caught it
+    for (let i = 0; i < (fresh ? 150 : 50) && mine === job && !tab.closing; i++) {
       if (tab.activeMediaBlocked) return tab.resumeDelayedMedia();
       await sleep(100);
     }

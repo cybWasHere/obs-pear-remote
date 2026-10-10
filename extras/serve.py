@@ -16,6 +16,10 @@ The Podcasts tab uses that mpv too: GET /podcast.json is the shows (podcasts.jso
 that is on, GET /podcast-episodes.json?show=<id> a show's latest episodes from its feed, POST
 /podcast plays, pauses and seeks.
 
+GET /now.json is what that mpv is on, whichever tab started it: {} or {kind, id, title, author,
+cover, paused}. POST /now with {"toggle": true} pauses it and goes on. For a program that shows
+what is playing next to its own play button and needn't know a radio from a podcast.
+
 And it is the remote's YouTube tab: GET /youtube.json is the video in your browser (playing or
 paused, from MPRIS; with ?after=<its "rev"> the answer waits until that changes), POST /youtube
 pauses, seeks or sets the volume of that video, or opens another one in your default browser. GET /youtube-home.json lists your YouTube home page; that needs yt-dlp
@@ -112,6 +116,7 @@ class Tube:
         self.now_at, self.now = 0.0, (None, {})
         self.asked = threading.Condition()    # the video to open, for a browser that waits for it
         self.seq, self.asked_id = int(time.time() * 1000), None    # seq never repeats across restarts
+        self.born = self.seq
         self.waiting, self.waited_at = 0, 0.0
 
     def current(self, fresh=False):
@@ -176,7 +181,16 @@ class Tube:
         name, now = self.current(fresh=True)
         if name and now["playing"]:    # the new video gets its own tab; don't leave two talking
             busctl("call", name, MPRIS_PATH, MPRIS_PLAYER, "Pause")
-        return webbrowser.open(f"https://www.youtube.com/watch?v={vid}")
+        url = f"https://www.youtube.com/watch?v={vid}"
+        if shutil.which("systemd-run") and shutil.which("xdg-open"):
+            # a browser this starts must not be this service's child: stopping the service would close it
+            try:    # not waited for: when no browser runs yet, this is the browser
+                subprocess.Popen(["systemd-run", "--user", "--scope", "--collect", "--quiet", "xdg-open", url],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except OSError:
+                pass
+        return webbrowser.open(url)
 
     def close_pip(self):
         """Tell the waiting browser to close its Picture-in-Picture window: an order with no video."""
@@ -188,6 +202,11 @@ class Tube:
         """Long poll: the last video asked for, as soon as it isn't number `after` (25 s at most).
         "close" instead of an id: close the Picture-in-Picture window."""
         with self.asked:
+            if not self.born <= after <= self.seq:
+                # a number from before this server started: nothing was asked since, and least of
+                # all to close the window of a video that plays
+                self.waited_at = time.monotonic()
+                return {"seq": self.seq, "id": None, "close": False}
             self.waiting += 1
             try:
                 self.asked.wait_for(lambda: self.seq != after, 25)
@@ -241,6 +260,7 @@ class Mpv:
         self.volume = 100
         self.muted = False
         self.before_stop = []    # called while the outgoing mpv can still be asked where it is
+        self.held = None    # the station /now stopped for a pause, until it or anything else starts
 
     def ipc(self, *command):
         """mpv's JSON IPC; None when mpv isn't there or (Windows) the socket is a named pipe."""
@@ -289,6 +309,7 @@ class Mpv:
             return False
         with self.lock:
             self.stop()
+            self.held = None
             self.proc = subprocess.Popen(
                 ["mpv", "--no-config", "--no-video", "--no-terminal", f"--audio-client-name={name}",
                  f"--volume={self.volume}", f"--mute={'yes' if self.muted else 'no'}",
@@ -335,6 +356,7 @@ class Radio:
             return []
 
     def stop(self):
+        self.mpv.held = None
         if self.mpv.playing("radio"):
             self.mpv.stop()
 
@@ -609,6 +631,32 @@ class Turns:
 MPV = RADIO = TUBE = PODS = TURNS = None    # set in main
 
 
+def now():
+    """What the mpv is on, for /now.json. A station that /now paused still counts: a live stream
+    can't wait, so it was stopped, and is started again by the next toggle."""
+    radio = RADIO.state()
+    st = next((s for s in radio["stations"] if s["id"] == (radio["playing"] or MPV.held)), None)
+    if st:
+        return {"kind": "radio", "id": st["id"], "title": radio["title"] or st["name"],
+                "author": st["name"] if radio["title"] else "", "cover": "", "paused": not radio["playing"]}
+    ep = PODS.state()["now"]
+    if ep:
+        return {"kind": "podcast", "id": ep["id"], "title": ep["title"], "author": ep["name"],
+                "cover": ep["image"], "paused": ep["paused"]}
+    return {}
+
+
+def now_toggle():
+    on = MPV.playing("radio")
+    if on:
+        RADIO.stop()
+        MPV.held = on[1]
+    elif MPV.held:
+        RADIO.play(MPV.held)
+    else:
+        PODS.control({"toggle": True})
+
+
 class Handler(SimpleHTTPRequestHandler):
     def local(self):
         """The Host values that are this server. What you are watching or listening to is not for
@@ -635,13 +683,15 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path not in ("/mpris.json", "/radio.json", "/youtube.json", "/youtube-home.json", "/youtube-open.json",
-                        "/podcast.json", "/podcast-episodes.json"):
+                        "/podcast.json", "/podcast-episodes.json", "/now.json"):
             return super().do_GET()
         local = self.local()
         if local is None:
             return
         if path == "/radio.json":
             return self.send_json(json.dumps(RADIO.state()).encode(), local)
+        if path == "/now.json":
+            return self.send_json(json.dumps(now()).encode(), local)
         if path == "/youtube.json":
             # ?after=<rev>: answer when the video changes (10 s at most), so a page needn't keep asking
             after = parse_qs(urlparse(self.path).query).get("after")
@@ -683,10 +733,11 @@ class Handler(SimpleHTTPRequestHandler):
         /youtube, body {"open": video id}, or what Tube.control takes.
         /podcast, body {"play": [show id, episode id]} | {"stop": true}, what Podcasts.control takes,
         and/or volume and muted as for the radio.
+        /now, body {"toggle": true}.
         Only for the pages this server serves: a JSON body can't be sent cross-origin without a
         preflight, which nothing here answers, and an Origin that isn't ours is refused outright."""
         path = urlparse(self.path).path
-        if path not in ("/radio", "/youtube", "/podcast"):
+        if path not in ("/radio", "/youtube", "/podcast", "/now"):
             return self.send_error(404)
         local = self.local()
         if local is None:
@@ -702,6 +753,10 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_error(404, "not a video id, or no browser to open it in")
                 TUBE.control(req)
                 return self.send_json(json.dumps(TUBE.state(fresh=True)).encode(), local)
+            if path == "/now":
+                if req.get("toggle"):
+                    now_toggle()
+                return self.send_json(json.dumps(now()).encode(), local)
             if path == "/podcast":
                 MPV.set(req.get("volume"), req.get("muted"))
                 if req.get("stop"):
@@ -720,7 +775,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json(json.dumps(RADIO.state()).encode(), local)
 
     def log_message(self, fmt, *args):
-        if not getattr(self, "path", "").startswith(("/mpris.json", "/radio", "/youtube", "/podcast")):    # unset on a malformed request
+        if not getattr(self, "path", "").startswith(("/mpris.json", "/radio", "/youtube", "/podcast", "/now.json")):    # unset on a malformed request
             super().log_message(fmt, *args)
 
 
@@ -753,7 +808,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))    # so the finally below runs
     handler = functools.partial(Handler, directory=a.directory)
     with ThreadingHTTPServer((a.bind, a.port), handler) as httpd:
-        print(f"serving {a.directory} on http://{a.bind}:{a.port}/ (+ /mpris.json, /radio.json, /youtube.json, /podcast.json)")
+        print(f"serving {a.directory} on http://{a.bind}:{a.port}/ (+ /mpris.json, /radio.json, /youtube.json, /podcast.json, /now.json)")
         try:
             httpd.serve_forever()
         finally:
