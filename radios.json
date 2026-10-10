@@ -36,6 +36,7 @@
   { "id": "nightride",     "group": "Internet", "name": "Nightride FM",      "note": "synthwave",                          "url": "https://stream.nightride.fm/nightride.mp3" },
   { "id": "chillsynth",    "group": "Internet", "name": "ChillSynth FM",     "note": "slow synthwave",                     "url": "https://stream.nightride.fm/chillsynth.mp3" },
   { "id": "datawave",      "group": "Internet", "name": "Datawave FM",       "note": "glitchy electronic to work to",      "url": "https://stream.nightride.fm/datawave.mp3" },
+  { "id": "truckersfm",    "group": "Internet", "name": "TruckersFM",        "note": "pop and dance for the long haul, from the Truck Sim community", "url": "https://live.truckers.fm/" },
   { "id": "groovesalad",   "group": "Internet", "name": "SomaFM Groove Salad", "note": "ambient beats and grooves",        "url": "https://ice1.somafm.com/groovesalad-128-mp3" },
   { "id": "secretagent",   "group": "Internet", "name": "SomaFM Secret Agent", "note": "spy-film lounge",                  "url": "https://ice2.somafm.com/secretagent-128-mp3" }
 ]
