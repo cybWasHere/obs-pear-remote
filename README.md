@@ -26,8 +26,9 @@ it, ✕ to remove it) and has a search box whose results you can play now, play 
 end. With an optional [Pear patch](#mixed-for-you-optional-pear-patch), a third tab lists your
 personal *Mixed for you* shelf (My Supermix, Discover Mix, My Mix 01…) and plays those too. A
 [Radio](#radio) tab plays internet radio stations, a [Podcasts](#podcasts) tab plays podcast
-episodes and remembers where you stopped, and a [YouTube](#youtube) tab lists your YouTube
-home page and controls the video in your browser. When
+episodes and remembers where you stopped, a [YouTube](#youtube) tab lists your YouTube
+home page and controls the video in your browser, and a [Twitch](#twitch) tab lists the channels
+you follow that are live. When
 the dock is wider than it is tall, it switches to a side-by-side layout.
 
 **Now Playing** (`now-playing.html`, a browser source): cover, title and artist. Long titles
@@ -192,6 +193,29 @@ The YouTube tab makes the dock a remote for the video in your browser too. It ne
   to yt-dlp and from there to YouTube, nowhere else. Pages can only ask for a video by its id; the
   server builds the address.
 
+## Twitch
+
+The Twitch tab lists the channels you follow that are live, with the game, the viewers and the
+title. It needs `extras/serve.py` started with `--twitch`, and
+[Chatterino](https://chatterino.com/) signed in: Twitch gives that list to a signed-in app only,
+so the server reads the login Chatterino keeps in its settings (native or Flatpak) and asks Twitch
+with it. It goes to Twitch and nowhere else. The list is kept for a minute; click the tab's icon
+again to refresh it.
+
+- **A click plays the stream like a YouTube video.** It opens in your browser; with
+  `extras/firefox-pip/pear-remote-pip.js` in Firefox (see [YouTube](#youtube)) it plays in the
+  Picture-in-Picture window, started from a background tab, and the next channel you click takes
+  the same window: the tab moves there the way a click on Twitch does. The player shows the
+  stream; previous / next step through the live channels.
+- **Chatterino opens on its chat, and closes with the stream.** That half needs the Firefox script
+  too, because it is Firefox that says when the stream is closed: its tab closed or moved
+  elsewhere, or its Picture-in-Picture window closed with ✕ (which pauses the stream). Sending
+  the window back to the tab, where the stream plays on, keeps the chat. Another channel moves
+  the chat there. A Chatterino you started yourself is left alone, both ways: no second one is
+  opened, and yours is never closed. `--no-twitch-chat` turns this off.
+- **One thing plays at a time** here too: a stream with sound and music take turns, as in
+  [YouTube](#youtube). Music starting pauses the stream and closes its window, and so Chatterino.
+
 ## Mixed for you (optional Pear patch)
 
 Your personal mixes need your YouTube login, and Pear's API can't queue a playlist or read your
@@ -292,6 +316,8 @@ have no such field, so the remote needs a theme block.
 | **Queue empty or song missing right after Pear starts** | Pear reports the player state only after its first player event. Press play/pause once. |
 | **YouTube tab: "start serve.py with --youtube-cookies"** | The home page list is opt-in. See [YouTube](#youtube). |
 | **YouTube tab: "yt-dlp returned no videos"** | You aren't signed in to YouTube in the browser you named, or yt-dlp is too old for today's YouTube: update it. |
+| **Twitch tab: "start serve.py with --twitch"** | The list is opt-in: it borrows Chatterino's login. See [Twitch](#twitch). |
+| **Twitch tab: "no Twitch login found"** | Chatterino isn't installed, or not signed in. |
 | **Mixes tab: "Pear needs the pear-mixes patch"** | Pear isn't patched, or an update replaced `app.asar` without the hook. See [Mixed for you](#mixed-for-you-optional-pear-patch). |
 | **The card ignores your edits** | OBS caches the page (Python's server sends no cache headers). In the source's properties, click *Refresh cache of current page*. |
 | **Windows: "Python 3 was not found, or it does not start"** | `py` or `python` points at a Python that was uninstalled. Reinstall it from python.org. |

@@ -1,5 +1,6 @@
-// Pear Remote, YouTube tab: play the clicked video in Firefox's Picture-in-Picture window, in the
-// place of whatever that window was showing, instead of opening a new tab each time.
+// Pear Remote, YouTube and Twitch tabs: play the clicked video or stream in Firefox's
+// Picture-in-Picture window, in the place of whatever that window was showing, instead of opening
+// a new tab each time.
 //
 // This is Firefox autoconfig code: it runs privileged, in the parent process, at startup. Append it
 // to your mozilla.cfg (see the README, "YouTube"); edits need a full Firefox restart.
@@ -11,8 +12,13 @@
 // Picture-in-Picture window just carries on with the new video; when there is none yet, one is
 // opened as Ctrl+Shift+] would, the moment the tab has a video to show. While nothing waits on that endpoint, serve.py opens a tab as before.
 //
+// A Twitch channel comes down the same wait and is played the same way, in a tab that is on Twitch.
+// What is new there: serve.py opens Chatterino next to the stream, so it is told (POST /twitch)
+// when the stream is closed: its tab closed or gone elsewhere, or its Picture-in-Picture window
+// closed with the stream paused, which is what the window's ✕ does.
+//
 // The same wait also brings the order to close the window: serve.py sends it when music starts
-// while a YouTube video plays, having paused the video itself.
+// while a video or a stream plays, having paused it itself.
 {
   const SERVER = "http://127.0.0.1:9870"; // where extras/serve.py listens
   const { setTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
@@ -31,6 +37,20 @@
     } catch (e) {} // about:, file: and friends have no host
     return null; // not on a YouTube video
   };
+  const NOT_CHANNELS = ["directory", "videos", "settings", "search", "downloads", "subscriptions", "inventory",
+                        "drops", "wallet", "friends", "turbo", "jobs", "store", "prime", "login", "signup", "following"];
+  const channelOf = browser => {
+    try {
+      const uri = browser.currentURI, name = /^\/(\w{2,25})\/?$/.exec(uri.filePath)?.[1].toLowerCase();
+      if (/(^|\.)twitch\.tv$/.test(uri.host) && name && !NOT_CHANNELS.includes(name)) return name;
+    } catch (e) {}
+    return null; // not on a Twitch channel
+  };
+  // what a tab is on, per site, and the address of a video or a channel there
+  const SITES = {
+    youtube: { at: videoOf, url: id => "https://www.youtube.com/watch?v=" + id },
+    twitch: { at: channelOf, url: name => "https://www.twitch.tv/" + name },
+  };
 
   // The tab behind a Picture-in-Picture window. Firefox keeps that in a module whose address has
   // moved between versions; without it, the tab is found by what is playing instead.
@@ -41,40 +61,74 @@
   }
   const pipBrowser = win => { try { return pipModule.weakWinToBrowser.get(win) ?? null; } catch (e) { return null; } };
 
-  function pickTab() {
+  const allTabs = () => {
     const tabs = [];
     for (const win of Services.wm.getEnumerator("navigator:browser")) {
       if (!win.closed && win.gBrowser) tabs.push(...win.gBrowser.tabs);
     }
+    return tabs;
+  };
+
+  function pickTab(site) {
     const from = pipWindows().map(pipBrowser).filter(Boolean);
-    const youtube = tabs.filter(t => videoOf(t.linkedBrowser) !== null);
-    return youtube.find(t => from.includes(t.linkedBrowser)) || youtube.find(t => t.soundPlaying) || youtube[0] || null;
+    const there = allTabs().filter(t => site.at(t.linkedBrowser) !== null);
+    return there.find(t => from.includes(t.linkedBrowser)) || there.find(t => t.soundPlaying) || there[0] || null;
   }
 
-  // Runs in the tab's process. With `go`, hand YouTube's own router the video, as a click on a
-  // thumbnail does: the page changes without a load, so the <video> element (and a PiP window on
-  // it) survives. Then put that element in Picture-in-Picture as soon as there is one to put, by
-  // the same call as the keyboard shortcut.
-  const inPage = (id, go) => {
+  // Runs in the tab's process. With `go`, hand the site's own router the video or the channel, as
+  // a click on a thumbnail does: the page changes without a load, so the <video> element (and a
+  // PiP window on it) survives. Then put that element in Picture-in-Picture as soon as there is
+  // one to put, by the same call as the keyboard shortcut.
+  const inPage = (kind, id, go, latest) => {
     const { setTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
+    const twitch = kind == "twitch";
+    // the click was on the remote, not in this page: without it Firefox lets a new tab play muted at best
+    try { content.document.notifyUserGestureActivation(); } catch (e) {}
     try {
-      const app = go && content.document.querySelector("ytd-app");
+      const app = go && !twitch && content.document.querySelector("ytd-app");
       if (app) {
         const detail = Cu.cloneInto({ endpoint: {
           commandMetadata: { webCommandMetadata: { url: "/watch?v=" + id, webPageType: "WEB_PAGE_TYPE_WATCH", rootVe: 3832 } },
           watchEndpoint: { videoId: id } } }, content);
         app.dispatchEvent(new content.CustomEvent("yt-navigate", { detail, bubbles: true, composed: true }));
       }
+      if (go && twitch) { // Twitch's router follows the address bar
+        content.history.pushState(null, "", "/" + id);
+        content.dispatchEvent(new content.PopStateEvent("popstate", { state: null }));
+      }
     } catch (e) { Cu.reportError(e); }
+    const here = () => twitch ? content.location.pathname.replace(/\/$/, "").toLowerCase() == "/" + id
+                              : content.location.search.includes("v=" + id);
     const until = Date.now() + 20000;
+    let stuck = 0, asked = 0;
     const pip = () => {
+      if (!latest()) return; // run again for this tab: two of these would open two windows
       try {
-        if (content.location.search.includes("v=" + id)) {
+        if (here()) {
           const actor = content.windowGlobalChild.getActor("PictureInPictureLauncher");
           const video = actor.findVideoToPiP(content.document);
-          if (video) {
-            if (!video.isCloningElementVisually) actor.togglePictureInPicture({ video, reason: "Shortcut" });
-            return;
+          // a stream's element is there before its picture is; the window would open with no shape
+          if (video && (!twitch || video.videoWidth || video.isCloningElementVisually)) {
+            // the window takes a moment to open: asking twice in that moment would open two
+            if (!video.isCloningElementVisually) {
+              // the window takes a moment to open: asking twice in that moment would open two.
+              // And one asked for while a stream changes channel may not come: ask again then
+              if (Date.now() - asked > 3000) {
+                asked = Date.now();
+                actor.togglePictureInPicture({ video, reason: "Shortcut" });
+              }
+            } else if (!twitch) {
+              if (video.paused && !go) try { video.play(); } catch (e) {} // the one it was on, paused: go on
+              return;
+            } else {
+              // a stream that was paused in this tab stays paused, on the next channel too: when
+              // Twitch's own button has said "paused" for a while, press it
+              if (!video.paused) return;
+              const button = content.document.querySelector('[data-a-target="player-play-pause-button"]');
+              if (button && button.getAttribute("data-a-player-state") != "paused") stuck = 0;
+              else if (!stuck) stuck = Date.now();
+              else if (Date.now() - stuck > 1500) return button ? button.click() : video.play();
+            }
           }
         }
       } catch (e) {} // between two documents
@@ -82,34 +136,92 @@
     };
     pip();
   };
-  const run = (browser, id, go) => browser.messageManager.loadFrameScript(
-    "data:application/javascript;charset=utf-8," + encodeURIComponent(`(${inPage})(${JSON.stringify(id)}, ${go})`), false);
+  const frame = (browser, code) => browser.messageManager.loadFrameScript(
+    "data:application/javascript;charset=utf-8," + encodeURIComponent(code), false, true); // true: in the tab's one global
+  let runs = 0; // frame scripts of one tab share their global: the latest run leaves its number there
+  const run = (browser, kind, id, go) => frame(browser, `this.pearRemoteRun = ${++runs};
+    (${inPage})(${JSON.stringify(kind)}, ${JSON.stringify(id)}, ${go}, () => this.pearRemoteRun === ${runs})`);
+  const quiet = browser => frame(browser, `for (const v of content.document.querySelectorAll("video")) v.pause()`);
+  // Close a Picture-in-Picture window as its own ✕ does: the video pauses and goes back to its tab.
+  const shut = win => {
+    const browser = pipBrowser(win);
+    if (browser) quiet(browser);
+    win.close();
+  };
+  // does a video play in this tab?
+  const playing = browser => new Promise(resolve => {
+    const mm = browser.messageManager, name = "PearRemote:playing:" + Math.random();
+    const done = msg => { mm.removeMessageListener(name, done); resolve(!!msg?.data); };
+    mm.addMessageListener(name, done);
+    frame(browser, `sendAsyncMessage(${JSON.stringify(name)}, [...content.document.querySelectorAll("video")].some(v => !v.paused && !v.ended))`);
+    setTimeout(done, 2000);
+  });
+
+  const tell = body => fetch(`${SERVER}/twitch`, { method: "POST", body: JSON.stringify(body),
+    headers: { "X-Pear-Remote": "firefox", "Content-Type": "application/json" } }).catch(() => {});
+
+  // Say when the stream of a channel is closed, for the Chatterino that serve.py opened with it.
+  let watch = 0; // one stream is watched at a time
+  async function watchStream(tab, name) {
+    const mine = ++watch, browser = tab.linkedBrowser, since = Date.now();
+    const inPip = () => pipWindows().some(w => (pipBrowser(w) ?? browser) === browser);
+    for (let had = false, seen = false; ; ) {
+      await sleep(500);
+      if (mine !== watch) return; // on another channel now, which serve.py knows
+      if (tab.closing || !tab.isConnected) break;
+      if (channelOf(browser) === name) seen = true;
+      else if (seen || Date.now() - since > 20000) break; // it left; or never got there
+      if (inPip()) had = true;
+      else if (had) {
+        // the window is gone. Its ✕ pauses the stream: closed. Its "back to tab" lets it play on: not closed
+        had = false;
+        await sleep(800);
+        if (mine !== watch) return;
+        if (!tab.closing && tab.isConnected && !inPip() && !(await playing(browser))) break;
+      }
+    }
+    if (mine === watch) tell({ closed: name });
+  }
 
   let job = 0; // a newer click takes over from one still in flight
-  async function open(id) {
-    const mine = ++job, url = "https://www.youtube.com/watch?v=" + id;
+  async function open(kind, id) {
+    const mine = ++job, site = SITES[kind], url = site.url(id);
     const arrived = async tries => {
-      for (let i = 0; i < tries && videoOf(browser) !== id; i++) await sleep(100);
-      return videoOf(browser) === id;
+      for (let i = 0; i < tries && site.at(browser) !== id; i++) await sleep(100);
+      return site.at(browser) === id;
     };
-    let tab = pickTab(), browser = tab?.linkedBrowser, fresh = !tab;
+    let tab = pickTab(site), browser = tab?.linkedBrowser, fresh = !tab;
     if (fresh) {
       const win = Services.wm.getMostRecentWindow("navigator:browser");
       if (!win) return;
       tab = win.gBrowser.addTab(url, { triggeringPrincipal: system, inBackground: true });
       browser = tab.linkedBrowser;
     }
-    for (const w of pipWindows()) if (pipBrowser(w) && pipBrowser(w) !== browser) w.close(); // one window
+    for (const w of pipWindows()) if (pipBrowser(w) && pipBrowser(w) !== browser) shut(w); // one window
+    for (const t of allTabs()) { // and one voice: the other site's video gives way
+      if (t.soundPlaying && t.linkedBrowser !== browser && Object.values(SITES).some(s => s.at(t.linkedBrowser) !== null)) quiet(t.linkedBrowser);
+    }
+    if (kind == "twitch") watchStream(tab, id);
+    // Twitch starts no player in a tab that isn't looked at. Firefox counts a tab as looked at
+    // while its video is in Picture-in-Picture; say so a moment early
+    const show = () => { if (kind == "twitch" && !tab.selected) try { browser.docShellIsActive = true; } catch (e) {} };
+    show();
     let there = false;
     if (!fresh) {
-      run(browser, id, videoOf(browser) !== id);
+      const title = browser.contentTitle, moving = site.at(browser) !== id;
+      run(browser, kind, id, moving);
       there = await arrived(30);
+      // Twitch's address moves at once, whether its router followed or not; its title tells
+      if (there && moving && kind == "twitch") {
+        for (let i = 0; i < 40 && !(there = browser.contentTitle !== title); i++) await sleep(100);
+      }
       if (mine !== job) return;
-      if (!there) browser.fixupAndLoadURIString(url, { triggeringPrincipal: system }); // YouTube didn't take it: a plain load
+      if (!there) browser.fixupAndLoadURIString(url, { triggeringPrincipal: system }); // the site didn't take it: a plain load
     }
     if (!there) {
       if (!(await arrived(150)) || mine !== job) return;
-      run(browser, id, false);
+      show(); // again: a new address can be a new process
+      run(browser, kind, id, false);
     }
     // a tab that was never in front holds its video back: a new one, or one Firefox brought back
     // with the last session. Let it go once Firefox has caught it
@@ -119,12 +231,12 @@
     }
   }
 
-  // Close the Picture-in-Picture windows that show a YouTube video (and those whose tab can't be
-  // told). The video goes back to its tab, paused as serve.py left it.
+  // Close the Picture-in-Picture windows that show a YouTube video or a Twitch stream (and those
+  // whose tab can't be told). It goes back to its tab, paused as serve.py left it.
   function closePip() {
     for (const w of pipWindows()) {
       const browser = pipBrowser(w);
-      if (!browser || videoOf(browser) !== null) w.close();
+      if (!browser || Object.values(SITES).some(s => s.at(browser) !== null)) shut(w);
     }
   }
 
@@ -136,9 +248,11 @@
                               { headers: { "X-Pear-Remote": "firefox" }, cache: "no-store" });
         if (!r.ok) throw new Error(r.status);
         const d = await r.json();
-        if (seq !== null && d.seq !== seq) {
+        if (seq === null) tell({ closed: true }); // Firefox has just started: no stream is open
+        else if (d.seq !== seq) {
           if (d.close) closePip();
-          else if (/^[\w-]{11}$/.test(d.id || "")) open(d.id).catch(Cu.reportError);
+          else if (/^\w{2,25}$/.test(d.twitch || "")) open("twitch", d.twitch.toLowerCase()).catch(Cu.reportError);
+          else if (/^[\w-]{11}$/.test(d.id || "")) open("youtube", d.id).catch(Cu.reportError);
         }
         seq = d.seq;
       } catch (e) { await sleep(5000); } // the server isn't running; it may come later
