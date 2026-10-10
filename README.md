@@ -25,7 +25,9 @@ volume and mute, like/dislike, shuffle and repeat. It shows the live queue (clic
 it, ✕ to remove it) and has a search box whose results you can play now, play next or add to the
 end. With an optional [Pear patch](#mixed-for-you-optional-pear-patch), a third tab lists your
 personal *Mixed for you* shelf (My Supermix, Discover Mix, My Mix 01…) and plays those too. A
-[Radio](#radio) tab plays internet radio stations. When
+[Radio](#radio) tab plays internet radio stations, a [Podcasts](#podcasts) tab plays podcast
+episodes and remembers where you stopped, and a [YouTube](#youtube) tab lists your YouTube
+home page and controls the video in your browser. When
 the dock is wider than it is tall, it switches to a side-by-side layout.
 
 **Now Playing** (`now-playing.html`, a browser source): cover, title and artist. Long titles
@@ -78,8 +80,9 @@ No git? *Code › Download ZIP* on GitHub works just as well.
 <summary><b>Other ways to serve, and starting at login</b></summary>
 <br>
 
-`extras/serve.py` is Python's `http.server` plus one endpoint, `/mpris.json`, which the card uses for
-the browser-video fallback. That fallback is Linux only; without it, the stock server does the rest:
+`extras/serve.py` is Python's `http.server` plus a few endpoints: `/mpris.json`, which the card uses
+for the browser-video fallback (Linux only), and the ones behind the remote's Radio, Podcasts and
+YouTube tabs. Without those, the stock server does the rest:
 
 ```sh
 python3 -m http.server 9870 --bind 127.0.0.1 --directory obs-pear-remote          # Linux / macOS
@@ -131,6 +134,62 @@ Pear can't play a stream, so `extras/serve.py` does, through [mpv](https://mpv.i
 - To add a station, add a line to `radios.json` (`id`, `group`, `name`, `note`, `url` of the audio
   stream itself, not of a web player). No restart needed. Pages can only ask for a station by
   `id`, never hand mpv a URL.
+
+## Podcasts
+
+The Podcasts tab lists the shows in `podcasts.json`, in French (Affaires sensibles, Distorsion,
+La Science CQFD, Underscore_, Le Collimateur…) and in English (Darknet Diaries, Hardcore History,
+99% Invisible, Song Exploder…). Click a show for its 40 latest episodes, read from its RSS feed;
+click an episode to play it. Like the radio it needs `extras/serve.py` and `mpv`, and it uses the
+same mpv, so a station and an episode never play together.
+
+- While an episode is on, the player is its player: play / pause, a seek bar you can click,
+  previous / next jump 15 s back and 30 s forward, volume and mute.
+- **It remembers where you stopped.** Stop an episode (click it again, or start anything else) and
+  it resumes there next time, also after a restart; an episode heard to the end is marked played.
+  That memory is one small file, `~/.local/state/obs-pear-remote/podcasts-heard.json`.
+- One thing plays at a time: starting an episode pauses Pear and the browser's video, and playing
+  anything in Pear stops the episode (it keeps its place).
+- To add a show, add a line to `podcasts.json`: `id`, `group`, `name`, `note`, `feed` (the RSS
+  address) and `image` (a square cover, optional). No restart needed. Pages can only ask for an
+  episode by show and id, never hand mpv a URL.
+
+## YouTube
+
+The YouTube tab makes the dock a remote for the video in your browser too. It needs
+`extras/serve.py` as the server, and Linux: the browser is read and controlled over MPRIS.
+
+- **Your home page.** Start `serve.py` with `--youtube-cookies firefox` (or `chrome`, `brave`…) and
+  the tab lists the first 30 videos of your YouTube home page, read by
+  [yt-dlp](https://github.com/yt-dlp/yt-dlp) signed in as that browser is. Click one and it opens
+  in your default browser, in a new tab. The list is kept for ten minutes; click the tab's icon
+  again to refresh it. Without the option the tab still controls the video, it just has no list.
+- **The player follows the video.** While a YouTube video plays in the browser and Pear doesn't,
+  the player shows it: play / pause, previous / next jump 10 s back and forward, the volume slider
+  and mute act on the video. It keeps the player while paused; play anything in Pear and the
+  player is Pear's again.
+- **The seek bar needs a browser that says where it is.** Firefox's own MPRIS entry reports no
+  position or length; with KDE's Plasma browser integration you get both, as long as the video is
+  the last thing that started playing in the browser.
+- **Firefox: play it in Picture-in-Picture, in place.** By default every click is a new tab. With
+  `extras/firefox-pip/pear-remote-pip.js` in Firefox, a click plays in the Picture-in-Picture
+  window instead, replacing the video that was there: the tab behind the window moves to the new
+  video the way a click on YouTube does, so the window never closes. With no window yet, one is
+  opened on a YouTube tab you already have, or on a new background tab. It is
+  [autoconfig](https://support.mozilla.org/kb/customizing-firefox-using-autoconfig) code, so it
+  runs with full browser privileges: read it first. Append it to your `mozilla.cfg` (wrapped in
+  `try { … } catch (e) { Cu.reportError(e); }` if the file has other code), set `SERVER` at its top
+  if you serve on another port, and restart Firefox. Tested with Firefox 157.
+- **One thing plays at a time.** Opening a video pauses Pear, the radio and the video you were on.
+  And the server keeps it that way whatever starts things, the remote, a hotkey or a click in the
+  browser: start a song in Pear, a station or an episode while a YouTube video plays, and the
+  video is paused (and its Picture-in-Picture window closed, if `pear-remote-pip.js` is in
+  Firefox); start the video again, and the music is paused (a station is stopped: it is live).
+  What already played together when the server started is left alone. `--let-both-play` turns
+  this off.
+- The option reads your browser's cookie store, which is why it is off by default. The cookies go
+  to yt-dlp and from there to YouTube, nowhere else. Pages can only ask for a video by its id; the
+  server builds the address.
 
 ## Mixed for you (optional Pear patch)
 
@@ -230,6 +289,8 @@ have no such field, so the remote needs a theme block.
 | **Nothing loads** | Is the server running? `http://127.0.0.1:9870/pear-remote.html` should open in a normal browser too. The URL must start with `http://`, not `file://`. |
 | **The card never appears** | *Plugins › Amuse* is off, or nothing is playing. `http://127.0.0.1:9863/query` should return JSON. |
 | **Queue empty or song missing right after Pear starts** | Pear reports the player state only after its first player event. Press play/pause once. |
+| **YouTube tab: "start serve.py with --youtube-cookies"** | The home page list is opt-in. See [YouTube](#youtube). |
+| **YouTube tab: "yt-dlp returned no videos"** | You aren't signed in to YouTube in the browser you named, or yt-dlp is too old for today's YouTube: update it. |
 | **Mixes tab: "Pear needs the pear-mixes patch"** | Pear isn't patched, or an update replaced `app.asar` without the hook. See [Mixed for you](#mixed-for-you-optional-pear-patch). |
 | **The card ignores your edits** | OBS caches the page (Python's server sends no cache headers). In the source's properties, click *Refresh cache of current page*. |
 | **Windows: "Python 3 was not found, or it does not start"** | `py` or `python` points at a Python that was uninstalled. Reinstall it from python.org. |

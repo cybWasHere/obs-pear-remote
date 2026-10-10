@@ -11,12 +11,32 @@ read it (a start page served on its own port), name its origin: --allow-origin h
 It also plays internet radio for the remote's Radio tab, if mpv is installed: GET /radio.json is
 the station list (radios.json) and what is on, POST /radio starts or stops a station. One mpv, owned
 by this server, so every open remote shows and controls the same radio.
+
+The Podcasts tab uses that mpv too: GET /podcast.json is the shows (podcasts.json) and the episode
+that is on, GET /podcast-episodes.json?show=<id> a show's latest episodes from its feed, POST
+/podcast plays, pauses and seeks.
+
+And it is the remote's YouTube tab: GET /youtube.json is the video in your browser (playing or
+paused, from MPRIS; with ?after=<its "rev"> the answer waits until that changes), POST /youtube
+pauses, seeks or sets the volume of that video, or opens another one in your default browser. GET /youtube-home.json lists your YouTube home page; that needs yt-dlp
+and your login, so it is off until you name the browser to borrow it from: --youtube-cookies firefox
+GET /youtube-open.json is for extras/firefox-pip: Firefox waits there for the next video to open, and
+plays it in its Picture-in-Picture window; while nobody waits, a video opens in a new tab.
+
+One thing plays at a time (Linux, where MPRIS says who is playing): start a song in Pear, a station
+or an episode while a YouTube video plays in your browser, and the video is paused and its
+Picture-in-Picture window closed (closing it is extras/firefox-pip's work); start the video again,
+and the music is paused. --let-both-play turns that off.
 """
 import argparse, functools, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time
+import hashlib, urllib.request, webbrowser
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+MPRIS_PATH, MPRIS_PLAYER = "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player"
 WATCH = re.compile(r"^https://(www\.|m\.)?youtube\.com/(watch|shorts/|live/)|^https://youtu\.be/")
 _cache = (0.0, b"{}")
 ALLOWED = set()    # extra origins that may read /mpris.json, from --allow-origin
@@ -38,56 +58,189 @@ def video_id(url):
     return parts[1] if len(parts) > 1 else ""
 
 
-def youtube_now():
-    """The best playing YouTube tab across MPRIS players. Plasma browser integration gives the
-    clean title and the channel; Firefox's own entry only has "<title> - YouTube"."""
+def players():
+    """Every MPRIS player: (bus name, properties, metadata)."""
     try:
         names = [p["name"] for p in busctl("list") or [] if p["name"].startswith("org.mpris.MediaPlayer2.")]
     except (OSError, subprocess.SubprocessError, ValueError):
-        return {}
-    best = None
+        return
     for name in names:
         try:
-            props = busctl("call", name, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties",
-                           "GetAll", "s", "org.mpris.MediaPlayer2.Player")
+            props = busctl("call", name, MPRIS_PATH, "org.freedesktop.DBus.Properties",
+                           "GetAll", "s", MPRIS_PLAYER)
         except (subprocess.SubprocessError, ValueError):
             continue
         if not props:
             continue
         p = {k: v["data"] for k, v in props["data"][0].items()}
-        meta = {k: v["data"] for k, v in p.get("Metadata", {}).items()}
+        yield name, p, {k: v["data"] for k, v in p.get("Metadata", {}).items()}
+
+
+def youtube_players():
+    """Every MPRIS player that is on a YouTube video, playing or not: (bus name, properties,
+    metadata, what the pages show of it)."""
+    for name, p, meta in players():
         url = meta.get("xesam:url", "")
-        if p.get("PlaybackStatus") != "Playing" or not WATCH.match(url):
+        if not WATCH.match(url):
             continue
-        artist = ", ".join(a for a in meta.get("xesam:artist", []) if a)
         vid = video_id(url)
-        cand = {"id": vid, "url": url, "author": artist,
-                "title": re.sub(r" - YouTube$", "", meta.get("xesam:title", "")),
-                "cover": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg" if vid else ""}
-        if best is None or (artist and not best["author"]):
+        yield name, p, meta, {"id": vid, "url": url, "author": ", ".join(a for a in meta.get("xesam:artist", []) if a),
+                              "title": re.sub(r" - YouTube$", "", meta.get("xesam:title", "")),
+                              "cover": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg" if vid else ""}
+
+
+def youtube_now():
+    """The best playing YouTube tab across MPRIS players. Plasma browser integration gives the
+    clean title and the channel; Firefox's own entry only has "<title> - YouTube"."""
+    best = None
+    for _, p, _, cand in youtube_players():
+        if p.get("PlaybackStatus") == "Playing" and (best is None or (cand["author"] and not best["author"])):
             best = cand
     return best or {}
 
 
-class Radio:
-    """One mpv playing one station. Stations come from radios.json and are named by id, so a page
-    can never hand mpv a URL of its own."""
+class Tube:
+    """YouTube in your browser, for the remote's YouTube tab: what it is on, a few controls over
+    MPRIS, and your home page through yt-dlp. A page names a video by id and this builds the URL,
+    so the browser is never handed an address of the page's choosing."""
+    ID = re.compile(r"^[\w-]{11}$")
 
-    def __init__(self, path):
-        self.path = Path(path)
-        self.sock = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(),
-                                 f"obs-pear-remote-radio-{os.getpid()}.sock")
+    def __init__(self, cookies):
+        self.cookies = cookies    # yt-dlp's --cookies-from-browser value, or None: no home page
         self.lock = threading.Lock()
+        self.home_at, self.home_items, self.home_note = 0.0, [], ""
+        self.now_at, self.now = 0.0, (None, {})
+        self.asked = threading.Condition()    # the video to open, for a browser that waits for it
+        self.seq, self.asked_id = int(time.time() * 1000), None    # seq never repeats across restarts
+        self.waiting, self.waited_at = 0, 0.0
+
+    def current(self, fresh=False):
+        """(bus name, state) of the video to show and control: a playing one before a paused one,
+        then the player that knows the most (Plasma browser integration has the length, the position
+        and the channel; Firefox's own entry has none of them)."""
+        if not fresh and time.monotonic() - self.now_at < 0.8:    # the remote polls every other second
+            return self.now
+        best = None
+        for name, p, meta, cand in youtube_players():
+            playing = p.get("PlaybackStatus") == "Playing"
+            length = meta.get("mpris:length") or 0
+            rank = (playing, bool(length), bool(cand["author"]))
+            if best is None or rank > best[0]:
+                best = (rank, name, dict(cand, playing=playing, length=length / 1e6,
+                                         position=(p.get("Position") or 0) / 1e6,
+                                         volume=round(100 * p["Volume"]) if "Volume" in p else None,
+                                         trackid=meta.get("mpris:trackid")))
+        self.now_at, self.now = time.monotonic(), (best[1], best[2]) if best else (None, {})
+        return self.now
+
+    def state(self, fresh=False):
+        now = {k: v for k, v in self.current(fresh)[1].items() if k != "trackid"}
+        return {"now": now, "home": bool(self.cookies and shutil.which("yt-dlp"))}
+
+    def hush(self, names=None):
+        """Pause every YouTube video that plays (or the players named), and close the
+        Picture-in-Picture window: music is starting."""
+        if names is None:
+            names = [name for name, p, _, _ in youtube_players() if p.get("PlaybackStatus") == "Playing"]
+        for name in names:
+            busctl("call", name, MPRIS_PATH, MPRIS_PLAYER, "Pause")
+        if names:
+            self.close_pip()
+
+    def control(self, req):
+        """{"toggle": true} | {"skip": ±seconds} | {"seek": seconds} | {"volume": 0-100} | {"hush": true}"""
+        if req.get("hush"):
+            self.hush()
+        name, now = self.current(fresh=True)
+        if not name:
+            return
+        call = lambda *a: busctl("call", name, MPRIS_PATH, MPRIS_PLAYER, *a)
+        if req.get("toggle"):
+            call("PlayPause")
+        if "skip" in req:
+            call("Seek", "x", str(int(float(req["skip"]) * 1e6)))
+        if "seek" in req and now["trackid"]:
+            call("SetPosition", "ox", now["trackid"], str(int(max(0.0, float(req["seek"])) * 1e6)))
+        if "volume" in req:
+            busctl("set-property", name, MPRIS_PATH, MPRIS_PLAYER, "Volume", "d",
+                   str(max(0, min(100, int(req["volume"]))) / 100))
+
+    def open(self, vid):
+        if not isinstance(vid, str) or not self.ID.match(vid):
+            return False
+        with self.asked:
+            if self.waiting or time.monotonic() - self.waited_at < 8:    # between two waits counts
+                self.seq, self.asked_id = self.seq + 1, vid
+                self.asked.notify_all()
+                return True    # the browser puts it where the last video was
+        name, now = self.current(fresh=True)
+        if name and now["playing"]:    # the new video gets its own tab; don't leave two talking
+            busctl("call", name, MPRIS_PATH, MPRIS_PLAYER, "Pause")
+        return webbrowser.open(f"https://www.youtube.com/watch?v={vid}")
+
+    def close_pip(self):
+        """Tell the waiting browser to close its Picture-in-Picture window: an order with no video."""
+        with self.asked:
+            self.seq, self.asked_id = self.seq + 1, None
+            self.asked.notify_all()
+
+    def wait_open(self, after):
+        """Long poll: the last video asked for, as soon as it isn't number `after` (25 s at most).
+        "close" instead of an id: close the Picture-in-Picture window."""
+        with self.asked:
+            self.waiting += 1
+            try:
+                self.asked.wait_for(lambda: self.seq != after, 25)
+            finally:
+                self.waiting -= 1
+                self.waited_at = time.monotonic()
+            return {"seq": self.seq, "id": self.asked_id, "close": self.asked_id is None}
+
+    def home(self, fresh=False):
+        """Your home page's videos, as yt-dlp's ":ytrec" reads them with the browser's login. Kept
+        for ten minutes; fresh=True asks again, but not more than once every 15 s."""
+        if not self.cookies:
+            return {"items": [], "note": "to list your YouTube home page, start serve.py with --youtube-cookies firefox (or your browser)"}
+        if not shutil.which("yt-dlp"):
+            return {"items": [], "note": "the YouTube home page needs yt-dlp installed"}
+        with self.lock:    # one yt-dlp at a time; whoever waited gets its result
+            age = time.monotonic() - self.home_at
+            if not self.home_at or age > 600 or (fresh and age > 15):
+                self.home_items, self.home_note = self._fetch()
+                self.home_at = time.monotonic()
+            return {"items": self.home_items, "note": self.home_note}
+
+    def _fetch(self):
+        try:
+            out = subprocess.run(["yt-dlp", "--ignore-config", "--cookies-from-browser", self.cookies, "--flat-playlist",
+                                  "--playlist-end", "30", "-J", ":ytrec"],
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=40)
+            entries = json.loads(out.stdout).get("entries") or []
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+            entries, out = [], None
+        items = [{"id": e["id"], "title": e.get("title") or "", "by": e.get("channel") or e.get("uploader") or "",
+                  "length": e.get("duration") or 0, "live": e.get("live_status") == "is_live",
+                  "thumb": f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"}
+                 for e in entries if isinstance(e, dict) and self.ID.match(str(e.get("id", "")))]
+        if items:
+            return items, ""
+        err = [l for l in (out.stderr if out else "").splitlines() if l.startswith("ERROR")]
+        return self.home_items, (err[-1][:200] if err else "yt-dlp returned no videos; are you signed in to YouTube in that browser?")
+
+
+class Mpv:
+    """The one mpv behind the Radio and Podcasts tabs: they share it, so one of them plays at a time
+    and both have the same volume."""
+
+    def __init__(self):
+        self.sock = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(),
+                                 f"obs-pear-remote-mpv-{os.getpid()}.sock")
+        self.lock = threading.RLock()
         self.proc = None
-        self.playing = None
+        self.what = None    # ("radio", station id) | ("podcast", show id, episode id)
         self.volume = 100
         self.muted = False
-
-    def stations(self):
-        try:    # read every time: the file is small, and editing it needs no restart
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
+        self.before_stop = []    # called while the outgoing mpv can still be asked where it is
 
     def ipc(self, *command):
         """mpv's JSON IPC; None when mpv isn't there or (Windows) the socket is a named pipe."""
@@ -112,32 +265,51 @@ class Radio:
         except (OSError, ValueError):
             return None
 
-    def _stop(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(2)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-        self.proc = self.playing = None
+    def playing(self, kind):
+        """What is on, if it is of this kind and mpv is still running."""
+        with self.lock:
+            if self.proc and self.proc.poll() is not None:    # the stream ended or mpv died
+                self.proc = self.what = None
+            return self.what if self.what and self.what[0] == kind else None
 
     def stop(self):
         with self.lock:
-            self._stop()
+            if self.proc and self.proc.poll() is None:
+                for hook in self.before_stop:
+                    hook()
+                self.proc.terminate()
+                try:
+                    self.proc.wait(2)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+            self.proc = self.what = None
 
-    def play(self, station_id):
-        url = next((s["url"] for s in self.stations() if s["id"] == station_id), None)
-        if not url or not shutil.which("mpv"):
+    def start(self, url, what, name, *args):
+        if not shutil.which("mpv"):
             return False
         with self.lock:
-            self._stop()
+            self.stop()
             self.proc = subprocess.Popen(
-                ["mpv", "--no-config", "--no-video", "--no-terminal", "--audio-client-name=Pear Remote Radio",
+                ["mpv", "--no-config", "--no-video", "--no-terminal", f"--audio-client-name={name}",
                  f"--volume={self.volume}", f"--mute={'yes' if self.muted else 'no'}",
-                 f"--input-ipc-server={self.sock}", "--", url],
+                 f"--input-ipc-server={self.sock}", *args, "--", url],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.playing = station_id
+            self.what = what
         return True
+
+    def sounding(self):
+        """Is a station or an episode on, and not paused?"""
+        with self.lock:
+            on = bool(self.what and self.proc and self.proc.poll() is None)
+        return on and not self.ipc("get_property", "pause")
+
+    def hush(self):
+        """Make way for something else: an episode pauses where it is, a live station stops."""
+        with self.lock:
+            if self.what and self.what[0] == "podcast":
+                self.ipc("set_property", "pause", True)
+            else:
+                self.stop()
 
     def set(self, volume=None, muted=None):
         if volume is not None:
@@ -147,18 +319,294 @@ class Radio:
             self.muted = bool(muted)
             self.ipc("set_property", "mute", self.muted)
 
+
+class Radio:
+    """Stations come from radios.json and are named by id, so a page can never hand mpv a URL of
+    its own."""
+
+    def __init__(self, mpv, path):
+        self.mpv = mpv
+        self.path = Path(path)
+
+    def stations(self):
+        try:    # read every time: the file is small, and editing it needs no restart
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+
+    def stop(self):
+        if self.mpv.playing("radio"):
+            self.mpv.stop()
+
+    def play(self, station_id):
+        url = next((s["url"] for s in self.stations() if s["id"] == station_id), None)
+        return bool(url) and self.mpv.start(url, ("radio", station_id), "Pear Remote Radio")
+
+    def set(self, volume=None, muted=None):
+        self.mpv.set(volume, muted)
+
     def state(self):
-        with self.lock:
-            if self.proc and self.proc.poll() is not None:    # the stream ended or mpv died
-                self.proc = self.playing = None
-            playing = self.playing
+        playing = (self.mpv.playing("radio") or (None, None))[1]
         return {"available": bool(shutil.which("mpv")), "playing": playing,
-                "title": (self.ipc("get_property", "metadata/by-key/icy-title") or "") if playing else "",
-                "volume": self.volume, "muted": self.muted,
+                "title": (self.mpv.ipc("get_property", "metadata/by-key/icy-title") or "") if playing else "",
+                "volume": self.mpv.volume, "muted": self.mpv.muted,
                 "stations": [{k: s.get(k, "") for k in ("id", "group", "name", "note")} for s in self.stations()]}
 
 
-RADIO = None    # set in main
+def seconds(text):
+    """itunes:duration, which is "3725", "62:05" or "1:02:05"."""
+    try:
+        n = 0
+        for part in (text or "").strip().split(":"):
+            n = n * 60 + float(part)
+        return int(n)
+    except ValueError:
+        return 0
+
+
+class Podcasts:
+    """Shows come from podcasts.json (id, group, name, note, feed, image); their episodes are read
+    from the feed, kept for a quarter of an hour, and named by a hash of their guid, so here too a
+    page asks for an episode and never hands mpv a URL. Where you stopped in each episode is kept
+    in a small file, so an episode resumes, across restarts as well."""
+    ITUNES = "{http://www.itunes.com/dtds/podcast-1.0.dtd}"
+
+    def __init__(self, mpv, path, memory):
+        self.mpv = mpv
+        self.path = Path(path)
+        self.memory = Path(memory)
+        self.lock = threading.Lock()
+        self.feeds = {}    # show id -> (when, episodes, note)
+        self.now = None    # the episode in mpv, with what the page shows of it
+        try:
+            self.heard = json.loads(self.memory.read_text(encoding="utf-8"))    # episode id -> [position, length, done]
+        except (OSError, ValueError):
+            self.heard = {}
+        mpv.before_stop.append(self.remember)
+        threading.Thread(target=self._keep, daemon=True).start()
+
+    def shows(self):
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+
+    def episodes(self, show_id):
+        show = next((s for s in self.shows() if s["id"] == show_id), None)
+        if not show:
+            return None
+        with self.lock:
+            at, eps, note = self.feeds.get(show_id, (0, [], ""))
+            if not at or time.monotonic() - at > 900:
+                try:
+                    eps, note = self._read(show["feed"]), ""
+                except (OSError, ValueError, ET.ParseError) as e:
+                    note = f"couldn't read the feed: {e}"[:200]    # and keep the episodes we had
+                self.feeds[show_id] = (time.monotonic(), eps, note)
+        return {"note": note, "episodes": [dict({k: e[k] for k in ("id", "title", "date", "length")},
+                                                at=self.heard.get(e["id"], [0, 0, False])[0],
+                                                done=self.heard.get(e["id"], [0, 0, False])[2]) for e in eps]}
+
+    def _read(self, feed):
+        if not str(feed).startswith(("https://", "http://")):
+            raise ValueError("not a web address")
+        req = urllib.request.Request(feed, headers={"User-Agent": "obs-pear-remote (podcast tab)"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            root = ET.fromstring(r.read(40 << 20))    # the big ones are 10 MB of show notes
+        out = []
+        for item in root.iter("item"):
+            enc = item.find("enclosure")
+            url = enc.get("url", "") if enc is not None else ""
+            if not url.startswith(("https://", "http://")):
+                continue
+            try:
+                date = int(parsedate_to_datetime(item.findtext("pubDate") or "").timestamp())
+            except (TypeError, ValueError):
+                date = 0
+            guid = (item.findtext("guid") or url).strip()
+            out.append({"id": hashlib.sha1(guid.encode()).hexdigest()[:12], "url": url, "date": date,
+                        "title": " ".join((item.findtext("title") or "").split()),
+                        "length": seconds(item.findtext(self.ITUNES + "duration"))})
+            if len(out) == 40:    # feeds list the newest first
+                break
+        return out
+
+    def play(self, show_id, episode_id):
+        show = next((s for s in self.shows() if s["id"] == show_id), None)
+        got = self.episodes(show_id)
+        ep = got and next((e for e in self.feeds[show_id][1] if e["id"] == episode_id), None)
+        if not ep:
+            return False
+        at, _, done = self.heard.get(episode_id, [0, 0, False])
+        ok = self.mpv.start(ep["url"], ("podcast", show_id, episode_id), "Pear Remote Podcast",
+                            *([f"--start={int(at)}"] if at > 10 and not done else []))
+        if ok:
+            self.now = {"show": show_id, "id": episode_id, "title": ep["title"], "name": show["name"],
+                        "image": show.get("image", ""), "length": ep["length"]}
+        return ok
+
+    def stop(self):
+        if self.mpv.playing("podcast"):
+            self.mpv.stop()
+
+    def where(self):
+        """(position, length, paused) from mpv; None while it has nothing loaded yet."""
+        pos = self.mpv.ipc("get_property", "time-pos")
+        if pos is None:
+            return None
+        return pos, self.mpv.ipc("get_property", "duration") or 0, bool(self.mpv.ipc("get_property", "pause"))
+
+    def remember(self):
+        what, w = self.mpv.playing("podcast"), None
+        if what:
+            w = self.where()
+        if w and w[0] > 0:
+            done = bool(w[1]) and w[0] > w[1] - 30    # the last half minute is the outro
+            self.heard[what[2]] = [0 if done else round(w[0]), round(w[1]), done or self.heard.get(what[2], [0, 0, False])[2]]
+
+    def _keep(self):
+        """Write down where the episode is every few seconds, so a crash or a power cut costs little."""
+        saved = None
+        while True:
+            time.sleep(5)
+            try:
+                self.remember()
+                now = json.dumps(self.heard)
+                if now != saved:
+                    self.memory.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = self.memory.with_suffix(".tmp")
+                    tmp.write_text(now, encoding="utf-8")
+                    tmp.replace(self.memory)
+                    saved = now
+            except OSError:
+                pass
+
+    def control(self, req):
+        """{"toggle": true} | {"skip": ±seconds} | {"seek": seconds}, for the episode that is on."""
+        if not self.mpv.playing("podcast"):
+            return
+        if req.get("toggle"):
+            self.mpv.ipc("cycle", "pause")
+        if "skip" in req:
+            self.mpv.ipc("seek", float(req["skip"]), "relative")
+        if "seek" in req:
+            self.mpv.ipc("seek", max(0.0, float(req["seek"])), "absolute")
+
+    def state(self):
+        what = self.mpv.playing("podcast")
+        now = {}
+        if what and self.now and self.now["id"] == what[2]:
+            w = self.where() or (self.heard.get(what[2], [0])[0], 0, False)
+            now = dict(self.now, position=w[0], length=w[1] or self.now["length"], paused=w[2])
+        return {"available": bool(shutil.which("mpv")), "now": now,
+                "volume": self.mpv.volume, "muted": self.mpv.muted,
+                "shows": [{k: s.get(k, "") for k in ("id", "group", "name", "note", "image")} for s in self.shows()]}
+
+
+class Turns:
+    """One thing plays at a time. Music is Pear (over MPRIS) or this server's mpv; the video is a
+    YouTube one in the browser. Whichever of the two starts while the other plays, the other is
+    paused. Only a start counts: what already played together when this began is left alone."""
+    PEAR = re.compile(r"youtube-music|pear", re.I)    # Pear's MPRIS Identity is still com.github.th-ch.youtube-music
+
+    def __init__(self, mpv, tube, act=True):
+        self.mpv, self.tube, self.act = mpv, tube, act
+        self.news = threading.Condition()    # for the pages that wait for the browser's video to change
+        self.rev, self.said, self.heard = int(time.time() * 1000), None, False
+        self.wake = threading.Event()
+        self.was = None    # (music played, a video played) at the last look
+        self.kind = {}     # bus name -> is it Pear
+        self.monitor = None
+
+    def start(self):
+        threading.Thread(target=self._listen, daemon=True).start()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def poke(self):
+        """Look now: the radio or a podcast just changed, which MPRIS does not tell."""
+        self.wake.set()
+
+    def stop(self):
+        if self.monitor and self.monitor.poll() is None:
+            self.monitor.terminate()
+
+    def _listen(self):
+        """Wake the other thread whenever an MPRIS player says something changed."""
+        while True:
+            try:
+                self.monitor = subprocess.Popen(
+                    ["busctl", "--user", "--json=short", "monitor", "--match",
+                     f"type='signal',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',path='{MPRIS_PATH}'",
+                     "--match", f"type='signal',interface='{MPRIS_PLAYER}',member='Seeked',path='{MPRIS_PATH}'"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                for _ in self.monitor.stdout:
+                    self.heard = True
+                    self.wake.set()
+            except OSError:
+                pass
+            time.sleep(5)    # the bus went away, or busctl can't monitor here; _run looks by itself meanwhile
+
+    def _run(self):
+        while True:
+            # an mpv that ends by itself, and a bus that can't be listened to, are caught by looking anyway
+            self.wake.wait(3 if self.was and self.was[0] or not self.monitor or self.monitor.poll() is not None else 30)
+            time.sleep(0.15)    # players announce a change in several signals
+            self.wake.clear()
+            heard, self.heard = self.heard, False
+            try:
+                if self.act:
+                    self.look()
+                self.tell(heard)
+            except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+                pass
+
+    def tell(self, heard):
+        """Let the waiting pages go when the video is another one, started, paused or was moved."""
+        now = {k: v for k, v in self.tube.current(fresh=True)[1].items() if k != "position"}
+        with self.news:
+            if heard or now != self.said:
+                self.rev, self.said = self.rev + 1, now
+                self.news.notify_all()
+
+    def wait(self, after, secs=10):
+        """Long poll: returns the number of the last change, as soon as it isn't `after`."""
+        with self.news:
+            self.news.wait_for(lambda: str(self.rev) != after, secs)
+            return self.rev
+
+    def is_pear(self, name):
+        if name not in self.kind:
+            got = busctl("get-property", name, MPRIS_PATH, "org.mpris.MediaPlayer2", "Identity")
+            if len(self.kind) > 50:
+                self.kind.clear()
+            self.kind[name] = bool(got and self.PEAR.search(str(got.get("data"))))
+        return self.kind[name]
+
+    def look(self):
+        pear, videos = [], []
+        for name, p, meta in players():
+            if p.get("PlaybackStatus") != "Playing":
+                continue
+            if WATCH.match(meta.get("xesam:url", "")):
+                videos.append(name)
+            elif self.is_pear(name):
+                pear.append(name)
+        mpv = self.mpv.sounding()
+        now = (bool(pear or mpv), bool(videos))
+        was, self.was = self.was, now    # what was seen, not what is hoped for: a player slow to say it paused must not look like a start
+        if was is None or not all(now):
+            return
+        if not was[0]:    # the music started
+            self.tube.hush(videos)
+        elif not was[1]:    # the video started
+            for name in pear:
+                busctl("call", name, MPRIS_PATH, MPRIS_PLAYER, "Pause")
+            if mpv:
+                self.mpv.hush()    # which announces nothing, so note it here, or mpv's next start would not be one
+                self.was = (bool(pear or self.mpv.sounding()), True)
+
+
+MPV = RADIO = TUBE = PODS = TURNS = None    # set in main
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -186,23 +634,59 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path not in ("/mpris.json", "/radio.json"):
+        if path not in ("/mpris.json", "/radio.json", "/youtube.json", "/youtube-home.json", "/youtube-open.json",
+                        "/podcast.json", "/podcast-episodes.json"):
             return super().do_GET()
         local = self.local()
         if local is None:
             return
         if path == "/radio.json":
             return self.send_json(json.dumps(RADIO.state()).encode(), local)
+        if path == "/youtube.json":
+            # ?after=<rev>: answer when the video changes (10 s at most), so a page needn't keep asking
+            after = parse_qs(urlparse(self.path).query).get("after")
+            if not TURNS:
+                return self.send_json(json.dumps(TUBE.state()).encode(), local)
+            rev = TURNS.wait(after[0] if after else None, 10) if after else TURNS.rev
+            return self.send_json(json.dumps(dict(TUBE.state(fresh=bool(after)), rev=str(rev))).encode(), local)
+        if path == "/podcast.json":
+            return self.send_json(json.dumps(PODS.state()).encode(), local)
+        if path == "/podcast-episodes.json":
+            got = PODS.episodes(parse_qs(urlparse(self.path).query).get("show", [""])[0])
+            return self.send_json(json.dumps(got).encode(), local) if got else self.send_error(404)
+        if path == "/youtube-open.json":
+            # a header no web page can add to a request to another origin: a site must not be able to
+            # sit here and have the remote's videos go nowhere
+            if self.headers.get("X-Pear-Remote") != "firefox":
+                return self.send_error(403)
+            try:
+                after = int(parse_qs(urlparse(self.path).query).get("after", ["-1"])[0])
+            except ValueError:
+                return self.send_error(400)
+            return self.send_json(json.dumps(TUBE.wait_open(after)).encode(), local)
+        if path == "/youtube-home.json":
+            return self.send_json(json.dumps(TUBE.home("fresh" in parse_qs(urlparse(self.path).query))).encode(), local)
         global _cache
         if time.monotonic() - _cache[0] > 0.8:    # the card polls every second
             _cache = (time.monotonic(), json.dumps(youtube_now()).encode())
         self.send_json(_cache[1], local)
 
     def do_POST(self):
+        try:
+            self.post()
+        finally:
+            if TURNS:
+                TURNS.poke()    # whatever this started, it is heard of at once
+
+    def post(self):
         """/radio, body {"play": id} | {"stop": true}, and/or {"volume": 0-100}, {"muted": bool}.
+        /youtube, body {"open": video id}, or what Tube.control takes.
+        /podcast, body {"play": [show id, episode id]} | {"stop": true}, what Podcasts.control takes,
+        and/or volume and muted as for the radio.
         Only for the pages this server serves: a JSON body can't be sent cross-origin without a
         preflight, which nothing here answers, and an Origin that isn't ours is refused outright."""
-        if urlparse(self.path).path != "/radio":
+        path = urlparse(self.path).path
+        if path not in ("/radio", "/youtube", "/podcast"):
             return self.send_error(404)
         local = self.local()
         if local is None:
@@ -213,17 +697,30 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_error(403)
         try:
             req = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 4096)))
+            if path == "/youtube":
+                if "open" in req and not TUBE.open(req["open"]):
+                    return self.send_error(404, "not a video id, or no browser to open it in")
+                TUBE.control(req)
+                return self.send_json(json.dumps(TUBE.state(fresh=True)).encode(), local)
+            if path == "/podcast":
+                MPV.set(req.get("volume"), req.get("muted"))
+                if req.get("stop"):
+                    PODS.stop()
+                elif "play" in req and not PODS.play(*map(str, req["play"][:2])):
+                    return self.send_error(404, "unknown episode, or mpv is not installed")
+                PODS.control(req)
+                return self.send_json(json.dumps(PODS.state()).encode(), local)
             RADIO.set(req.get("volume"), req.get("muted"))
             if req.get("stop"):
                 RADIO.stop()
             elif "play" in req and not RADIO.play(req["play"]):
                 return self.send_error(404, "unknown station, or mpv is not installed")
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, TypeError, AttributeError, OSError, subprocess.SubprocessError):
             return self.send_error(400)
         self.send_json(json.dumps(RADIO.state()).encode(), local)
 
     def log_message(self, fmt, *args):
-        if not getattr(self, "path", "").startswith(("/mpris.json", "/radio")):    # unset on a malformed request
+        if not getattr(self, "path", "").startswith(("/mpris.json", "/radio", "/youtube", "/podcast")):    # unset on a malformed request
             super().log_message(fmt, *args)
 
 
@@ -236,14 +733,30 @@ if __name__ == "__main__":
                     help="another origin that may read /mpris.json, e.g. http://127.0.0.1:9875 (repeatable)")
     ap.add_argument("--radios", default=Path(__file__).resolve().parent.parent / "radios.json",
                     help="the station list for the remote's Radio tab (default: radios.json next to the pages)")
+    ap.add_argument("--podcasts", default=Path(__file__).resolve().parent.parent / "podcasts.json",
+                    help="the shows for the remote's Podcasts tab (default: podcasts.json next to the pages)")
+    ap.add_argument("--youtube-cookies", metavar="BROWSER",
+                    help="list your YouTube home page in the remote's YouTube tab, signed in as this browser is: "
+                         "firefox, chrome, brave… (yt-dlp's --cookies-from-browser; needs yt-dlp)")
+    ap.add_argument("--let-both-play", action="store_true",
+                    help="don't pause the browser's YouTube video when music starts, nor the music when the video starts")
     a = ap.parse_args()
     ALLOWED.update(o.rstrip("/") for o in a.allow_origin)
-    RADIO = Radio(a.radios)
+    MPV = Mpv()
+    RADIO = Radio(MPV, a.radios)
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "obs-pear-remote/podcasts-heard.json"
+    PODS = Podcasts(MPV, a.podcasts, state)
+    TUBE = Tube(a.youtube_cookies)
+    if shutil.which("busctl"):
+        TURNS = Turns(MPV, TUBE, act=not a.let_both_play)
+        TURNS.start()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))    # so the finally below runs
     handler = functools.partial(Handler, directory=a.directory)
     with ThreadingHTTPServer((a.bind, a.port), handler) as httpd:
-        print(f"serving {a.directory} on http://{a.bind}:{a.port}/ (+ /mpris.json, /radio.json)")
+        print(f"serving {a.directory} on http://{a.bind}:{a.port}/ (+ /mpris.json, /radio.json, /youtube.json, /podcast.json)")
         try:
             httpd.serve_forever()
         finally:
-            RADIO.stop()    # the radio doesn't outlive its only remote control
+            MPV.stop()    # the radio and the podcast don't outlive their only remote control
+            if TURNS:
+                TURNS.stop()
