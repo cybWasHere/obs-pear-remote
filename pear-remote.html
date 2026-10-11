@@ -260,7 +260,8 @@ function renderSong() {
   const s = st.song;
   $("title").textContent = s ? s.title : "—";
   $("artist").textContent = s ? [s.artist, s.album].filter(Boolean).join(" · ") : "";
-  if (s && s.imageSrc && $("cover").src !== s.imageSrc) $("cover").src = s.imageSrc;
+  if (!(s && s.imageSrc)) $("cover").removeAttribute("src");
+  else if ($("cover").src !== s.imageSrc) $("cover").src = s.imageSrc;
   ambient(s && s.imageSrc);
   $("dur").textContent = fmt(s && s.songDuration);
 }
@@ -386,7 +387,7 @@ function renderControls() {
   $("muteIcon").setAttribute("d", muted
     ? "M16.5 12A4.5 4.5 0 0 0 14 8v2.2l2.5 2.4V12ZM19 12c0 .9-.2 1.8-.5 2.6l1.5 1.5A8.8 8.8 0 0 0 21 12c0-4.3-3-7.9-7-8.8v2.1c2.9.9 5 3.5 5 6.7ZM4.3 3 3 4.3 7.7 9H3v6h4l5 5v-6.7l4.3 4.2c-.7.5-1.4.9-2.3 1.2v2A9 9 0 0 0 17.7 19l2 2 1.3-1.3-9-9L4.3 3ZM12 4 9.9 6.1 12 8.2V4Z"
     : "M3 9v6h4l5 5V4L7 9H3Zm13.5 3A4.5 4.5 0 0 0 14 8v8c1.5-.7 2.5-2.2 2.5-4Z");
-  if (volume != null && document.activeElement !== $("vol")) $("vol").value = volume;
+  if (volume != null && !volHeld) $("vol").value = volume;
 }
 
 function tick() {
@@ -542,7 +543,7 @@ function firstSong(m) {
       walk(d);
       return id;
     })
-    .catch(() => null);
+    .catch(() => { m.first = null; return null; });   // ask again on the next hover
 }
 
 async function playMix(m) {
@@ -557,7 +558,7 @@ async function playMix(m) {
 
 // A mix queues as a playlist id (needs extras/pear-mixes); its ~200 tracks take a moment to
 // arrive, so wait for the queue to grow before skipping into it.
-async function addMix(m, where, andPlay) {
+async function addMix(m, where) {
   const t0 = Date.now(), log = (...a) => console.log(`[mix ${m.playlistId} +${Date.now() - t0}ms]`, ...a);
   let before;
   try { before = ((await api("queue")) || {}).items?.length ?? 0; } catch (e) { before = 0; log("queue read failed:", e.message); }
@@ -572,7 +573,6 @@ async function addMix(m, where, andPlay) {
     if (n > before) {
       log("queue grew to", n);
       status(`queued: ${m.title} (${n - before} songs)`);
-      if (andPlay) { hushTube(); await act("next"); }
       return setTimeout(loadQueue, 500);
     }
   }
@@ -622,13 +622,14 @@ async function radio(body) {
     const r = await fetch("/radio", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     if (!r.ok) throw new Error("radio " + r.status);
     applyRadio(await r.json());
-  } catch (e) { status(e.message, true); }
+    return true;
+  } catch (e) { status(e.message, true); return false; }
 }
 
 async function playRadio(r) {
   radioAt = performance.now();
+  if (!(await radio({ play: r.id }))) return;   // it says why; what was playing goes on
   if (st.playing) { st.playing = false; act("pause"); }   // one thing plays at a time
-  await radio({ play: r.id });
   status(`radio: ${r.name}`);
   loadPod();   // the station took the podcast's mpv
 }
@@ -713,7 +714,7 @@ async function watchTube() {
     try {
       const d = await (await fetch("/youtube.json" + (rev === null ? "" : "?after=" + rev), { cache: "no-store" })).json();
       applyTube(d);
-      if (d.rev !== undefined) { rev = d.rev; wait = 0; }
+      if (d.rev !== undefined) { rev = d.rev; wait = 300; }   // the server answers at once when it has news: not in a tight loop
     } catch { rev = null; }
     if (wait) await new Promise(r => setTimeout(r, wait));
   }
@@ -728,7 +729,8 @@ async function tube(body) {
     if (!r.ok) throw new Error("youtube " + r.status);
     applyTube(await r.json());
     setTimeout(loadTube, 500);   // the browser takes a moment to say it paused or moved
-  } catch (e) { status(e.message, true); }
+    return true;
+  } catch (e) { status(e.message, true); return false; }
 }
 
 async function loadHome(fresh) {
@@ -741,11 +743,11 @@ async function loadHome(fresh) {
 }
 
 async function openTube(h) {
+  status(`opening: ${h.title}`);
+  if (!(await tube({ open: h.id }))) return;   // it says why; what was playing goes on
   if (st.playing) { st.playing = false; act("pause"); }   // one thing plays at a time
   if (st.radio.playing) radio({ stop: true });
   if (onPod()) pod({ stop: true });
-  status(`opening: ${h.title}`);
-  await tube({ open: h.id });
 }
 
 // ---- twitch ----
@@ -765,14 +767,14 @@ async function loadLive(fresh) {
 }
 
 async function openLive(c) {
-  if (st.playing) { st.playing = false; act("pause"); }   // one thing plays at a time
-  if (st.radio.playing) radio({ stop: true });
-  if (onPod()) pod({ stop: true });
   status(`opening: ${c.name}`);
   try {
     const r = await fetch("/twitch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ open: c.login }) });
     if (!r.ok) throw new Error("twitch " + r.status);
     applyTube(await r.json());
+    if (st.playing) { st.playing = false; act("pause"); }   // one thing plays at a time
+    if (st.radio.playing) radio({ stop: true });
+    if (onPod()) pod({ stop: true });
   } catch (e) { status(e.message, true); }
 }
 
@@ -799,6 +801,13 @@ function parseQueue(data) {
 
 function parseSearch(data) {
   const out = [], seen = new Set();
+  // a song or a video, whatever language the row's "Song"/"Video" label is in: its play button says
+  // which kind of thing it starts (an album's has a playlist with it, a podcast episode's another kind)
+  const track = e => {
+    const w = e && e.watchEndpoint, c = w && w.watchEndpointMusicSupportedConfigs;
+    const kind = c && c.watchEndpointMusicConfig && c.watchEndpointMusicConfig.musicVideoType;
+    return !!kind && !w.playlistId && kind !== "MUSIC_VIDEO_TYPE_PODCAST_EPISODE";
+  };
   const walk = o => {
     if (Array.isArray(o)) { o.forEach(walk); return; }
     if (!o || typeof o !== "object") return;
@@ -807,7 +816,7 @@ function parseSearch(data) {
       const t = card.title && card.title.runs && card.title.runs[0];
       const vid = t && t.navigationEndpoint && t.navigationEndpoint.watchEndpoint && t.navigationEndpoint.watchEndpoint.videoId;
       const sub = runs(card.subtitle);
-      if (vid && /^(Song|Video)/.test(sub)) out.push({ videoId: vid, title: runs(card.title), sub,
+      if (vid && (/^(Song|Video)/.test(sub) || track(t.navigationEndpoint))) out.push({ videoId: vid, title: runs(card.title), sub,
         thumb: thumbOf(card.thumbnail && card.thumbnail.musicThumbnailRenderer && card.thumbnail.musicThumbnailRenderer.thumbnail) });
     }
     const r = o.musicResponsiveListItemRenderer;
@@ -822,7 +831,7 @@ function parseSearch(data) {
       const vid = (r.playlistItemData && r.playlistItemData.videoId) || watch(r.navigationEndpoint)
         || watch(play && play.playNavigationEndpoint);
       const sub = col(1);
-      if (vid && /^(Song|Video)/.test(sub)) out.push({ videoId: vid, title: col(0), sub,
+      if (vid && (/^(Song|Video)/.test(sub) || track(r.navigationEndpoint) || track(play && play.playNavigationEndpoint))) out.push({ videoId: vid, title: col(0), sub,
         thumb: thumbOf(r.thumbnail && r.thumbnail.musicThumbnailRenderer && r.thumbnail.musicThumbnailRenderer.thumbnail) });
     }
     for (const k in o) walk(o[k]);
@@ -861,6 +870,8 @@ async function loadMixes() {
   try {
     // "browse:<id>" only works with Pear patched by extras/pear-mixes; unpatched, it's a plain search
     const mixes = parseMixes(await api("search", { method: "POST", body: { query: "browse:FEmusic_mixed_for_you" } }));
+    const had = new Map(st.mixes.map(m => [m.playlistId, m.first]));   // lookups made the last time the tab was open
+    for (const m of mixes) if (had.get(m.playlistId)) m.first = had.get(m.playlistId);
     st.mixes = mixes;
     st.mixesNote = mixes.length ? "" : "no mixes: Pear needs the pear-mixes patch (extras/pear-mixes)";
     mixes.slice(0, 4).forEach(firstSong);   // the pointer arrives at the top of the list
@@ -961,11 +972,17 @@ $("shuffle").onclick = () => act("shuffle").then(() => setTimeout(loadQueue, 800
 $("repeat").onclick = () => act("switch-repeat", { iteration: 1 });
 $("mute").onclick = () => onAir() ? radio({ muted: !st.radio.muted }) : onPod() ? pod({ muted: !st.pod.muted })
   : onTube() ? tube({ volume: onTube().volume === 0 ? tubeVol : 0 }) : act("toggle-mute");
+// a drag fires an event per pixel: the latest value is sent, ten times a second at most
+let volHeld = false, volTimer = null, volSend = null;
+const paced = send => { volSend = send; volTimer ||= setTimeout(() => { volTimer = null; volSend(); }, 100); };
+$("vol").onpointerdown = () => { volHeld = true; };
+$("vol").onpointerup = $("vol").onpointercancel = $("vol").onblur = () => { volHeld = false; };
 $("vol").oninput = e => {
-  if (onAir()) return radio({ volume: st.radio.volume = +e.target.value });
-  if (onPod()) return pod({ volume: st.pod.volume = +e.target.value });
-  if (onTube()) return tube({ volume: st.tube.now.volume = +e.target.value });
-  st.volume = +e.target.value; act("volume", { volume: st.volume });
+  const v = +e.target.value;
+  if (onAir()) { st.radio.volume = v; return paced(() => radio({ volume: v })); }
+  if (onPod()) { st.pod.volume = v; return paced(() => pod({ volume: v })); }
+  if (onTube()) { st.tube.now.volume = v; return paced(() => tube({ volume: v })); }
+  st.volume = v; paced(() => act("volume", { volume: v }));
 };
 $("bar").onclick = e => {
   const ep = onPod(), v = onTube();
