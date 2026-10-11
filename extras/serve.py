@@ -5,8 +5,9 @@ when Pear has nothing playing.
 
     python3 extras/serve.py 9870 --bind 127.0.0.1 --directory .
 
-/mpris.json is readable by pages this server serves, and by nobody else. To let another local page
-read it (a start page served on its own port), name its origin: --allow-origin http://127.0.0.1:9875
+What this server answers is readable by the pages it serves, and by nobody else. To let another
+local page read it too (a start page served on its own port), name its origin:
+--allow-origin http://127.0.0.1:9875   (that page can then read every endpoint below)
 
 It also plays internet radio for the remote's Radio tab, if mpv is installed: GET /radio.json is
 the station list (radios.json) and what is on, POST /radio starts or stops a station. One mpv, owned
@@ -91,12 +92,16 @@ def players():
         try:
             props = busctl("call", name, MPRIS_PATH, "org.freedesktop.DBus.Properties",
                            "GetAll", "s", MPRIS_PLAYER)
-        except (subprocess.SubprocessError, ValueError):
+        except (OSError, subprocess.SubprocessError, ValueError):
             continue
         if not props:
             continue
-        p = {k: v["data"] for k, v in props["data"][0].items()}
-        yield name, p, {k: v["data"] for k, v in p.get("Metadata", {}).items()}
+        try:
+            p = {k: v["data"] for k, v in props["data"][0].items()}
+            meta = {k: v["data"] for k, v in p.get("Metadata", {}).items()}
+        except (LookupError, TypeError, AttributeError):    # not the shape busctl gives today
+            continue
+        yield name, p, meta
 
 
 def video_players():
@@ -203,7 +208,7 @@ class Tube:
                    str(max(0, min(100, int(req["volume"]))) / 100))
 
     def open(self, vid):
-        if not isinstance(vid, str) or not self.ID.match(vid):
+        if not isinstance(vid, str) or not self.ID.fullmatch(vid):
             return False
         return self.ask(vid, None) or self.browse(f"https://www.youtube.com/watch?v={vid}")
 
@@ -263,7 +268,7 @@ class Tube:
             age = time.monotonic() - self.home_at
             if not self.home_at or age > 600 or (fresh and age > 15):
                 self.home_items, self.home_note = self._fetch()
-                self.home_at = time.monotonic()
+                self.home_at = time.monotonic() - (570 if self.home_note else 0)    # a failed one is tried again after 30 s
             return {"items": self.home_items, "note": self.home_note}
 
     def _fetch(self):
@@ -277,7 +282,7 @@ class Tube:
         items = [{"id": e["id"], "title": e.get("title") or "", "by": e.get("channel") or e.get("uploader") or "",
                   "length": e.get("duration") or 0, "live": e.get("live_status") == "is_live",
                   "thumb": f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"}
-                 for e in entries if isinstance(e, dict) and self.ID.match(str(e.get("id", "")))]
+                 for e in entries if isinstance(e, dict) and self.ID.fullmatch(str(e.get("id", "")))]
         if items:
             return items, ""
         err = [l for l in (out.stderr if out else "").splitlines() if l.startswith("ERROR")]
@@ -310,6 +315,7 @@ class Twitch:
     def __init__(self, tube, on, chat=True):
         self.tube, self.on, self.chat = tube, on, chat
         self.lock = threading.Lock()
+        self.chatting = threading.Lock()    # opening and closing Chatterino, which can take seconds
         self.at, self.items, self.note = 0.0, [], ""
         self.opened_at = 0.0
         self.started = time.monotonic()
@@ -363,10 +369,10 @@ class Twitch:
         return [{"login": s["user_login"], "name": s["user_name"], "game": s.get("game_name") or "",
                  "title": " ".join((s.get("title") or "").split()), "viewers": s.get("viewer_count") or 0,
                  "thumb": self.thumb(s["user_login"])}
-                for s in data if self.NAME.match(s.get("user_login") or "")], ""
+                for s in data if self.NAME.fullmatch(s.get("user_login") or "")], ""
 
     def open(self, name):
-        if not isinstance(name, str) or not self.NAME.match(name):
+        if not isinstance(name, str) or not self.NAME.fullmatch(name):
             return False
         name = name.lower()
         if self.tube.ask(None, name):
@@ -395,7 +401,7 @@ class Twitch:
     def open_chat(self, name):
         if not self.chat:
             return
-        with self.lock:
+        with self.chatting:
             running = self.chatterinos()
             if any(on is None for _, on in running) or any(on == name for _, on in running):
                 return    # yours is open, and you know where the chat is; or ours is there already
@@ -407,7 +413,9 @@ class Twitch:
 
     def close_chat(self, name=None):
         """The stream of this channel was closed (None: whichever it was)."""
-        with self.lock:
+        if not self.chat:
+            return
+        with self.chatting:
             self._close([(pid, on) for pid, on in self.chatterinos() if name is None or on == name])
 
     def _close(self, running):
@@ -493,6 +501,10 @@ class Mpv:
                 except subprocess.TimeoutExpired:
                     self.proc.kill()
             self.proc = self.what = None
+            try:
+                os.unlink(self.sock)    # mpv leaves it behind
+            except OSError:
+                pass
 
     def start(self, url, what, name, *args):
         if not shutil.which("mpv"):
@@ -520,7 +532,9 @@ class Mpv:
             if self.what and self.what[0] == "podcast":
                 self.ipc("set_property", "pause", True)
             else:
+                station = self.what and self.what[1]
                 self.stop()
+                self.held = station    # as when /now pauses it: the next toggle starts it again
 
     def set(self, volume=None, muted=None):
         if volume is not None:
@@ -588,8 +602,10 @@ class Podcasts:
         self.path = Path(path)
         self.memory = Path(memory)
         self.lock = threading.Lock()
+        self.reading = {}    # show id -> its own lock: a slow feed holds up nobody else's
         self.feeds = {}    # show id -> (when, episodes, note)
         self.now = None    # the episode in mpv, with what the page shows of it
+        self.saved = None    # what the file holds
         try:
             self.heard = json.loads(self.memory.read_text(encoding="utf-8"))    # episode id -> [position, length, done]
         except (OSError, ValueError):
@@ -608,13 +624,15 @@ class Podcasts:
         if not show:
             return None
         with self.lock:
+            reading = self.reading.setdefault(show_id, threading.Lock())
+        with reading:
             at, eps, note = self.feeds.get(show_id, (0, [], ""))
             if not at or time.monotonic() - at > 900:
                 try:
                     eps, note = self._read(show["feed"]), ""
                 except (OSError, ValueError, ET.ParseError) as e:
                     note = f"couldn't read the feed: {e}"[:200]    # and keep the episodes we had
-                self.feeds[show_id] = (time.monotonic(), eps, note)
+                self.feeds[show_id] = (time.monotonic() - (870 if note else 0), eps, note)    # a failed read is tried again after 30 s
         return {"note": note, "episodes": [dict({k: e[k] for k in ("id", "title", "date", "length")},
                                                 at=self.heard.get(e["id"], [0, 0, False])[0],
                                                 done=self.heard.get(e["id"], [0, 0, False])[2]) for e in eps]}
@@ -678,20 +696,22 @@ class Podcasts:
 
     def _keep(self):
         """Write down where the episode is every few seconds, so a crash or a power cut costs little."""
-        saved = None
         while True:
             time.sleep(5)
-            try:
-                self.remember()
-                now = json.dumps(self.heard)
-                if now != saved:
-                    self.memory.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = self.memory.with_suffix(".tmp")
-                    tmp.write_text(now, encoding="utf-8")
-                    tmp.replace(self.memory)
-                    saved = now
-            except OSError:
-                pass
+            self.save()
+
+    def save(self):
+        try:
+            self.remember()
+            now = json.dumps(self.heard)
+            if now != self.saved:
+                self.memory.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.memory.with_suffix(".tmp")
+                tmp.write_text(now, encoding="utf-8")
+                tmp.replace(self.memory)
+                self.saved = now
+        except OSError:
+            pass
 
     def control(self, req):
         """{"toggle": true} | {"skip": ±seconds} | {"seek": seconds}, for the episode that is on."""
@@ -717,8 +737,9 @@ class Podcasts:
 
 class Turns:
     """One thing plays at a time. Music is Pear (over MPRIS) or this server's mpv; the video is a
-    YouTube one or a Twitch stream in the browser. Whichever of the two starts while the other plays, the other is
-    paused. Only a start counts: what already played together when this began is left alone."""
+    YouTube one or a Twitch stream in the browser. Whichever of the two starts while the other
+    plays, the other is paused. Pear and the mpv take turns with each other the same way. Only a
+    start counts: what already played together when this began is left alone."""
     PEAR = re.compile(r"youtube-music|pear", re.I)    # Pear's MPRIS Identity is still com.github.th-ch.youtube-music
 
     def __init__(self, mpv, tube, act=True):
@@ -727,6 +748,7 @@ class Turns:
         self.rev, self.said, self.heard = int(time.time() * 1000), None, False
         self.wake = threading.Event()
         self.was = None    # (music played, a video played) at the last look
+        self.tunes = None    # (Pear played, the mpv played) at the last look: they take turns with each other too
         self.kind = {}     # bus name -> is it Pear
         self.monitor = None
 
@@ -769,7 +791,7 @@ class Turns:
                 if self.act:
                     self.look()
                 self.tell(heard)
-            except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+            except (OSError, subprocess.SubprocessError, ValueError, LookupError, TypeError):
                 pass
 
     def tell(self, heard):
@@ -806,7 +828,19 @@ class Turns:
         mpv = self.mpv.sounding()
         now = (bool(pear or mpv), bool(videos))
         was, self.was = self.was, now    # what was seen, not what is hoped for: a player slow to say it paused must not look like a start
-        if was is None or not all(now):
+        tunes, self.tunes = self.tunes, (bool(pear), mpv)
+        if was is None:
+            return
+        if pear and mpv and tunes != (True, True):
+            if not tunes[1]:    # the station or the episode started: Pear gives way
+                for name in pear:
+                    busctl("call", name, MPRIS_PATH, MPRIS_PLAYER, "Pause")
+                pear = []
+            else:    # Pear started: an episode pauses where it is, a station stops
+                self.mpv.hush()
+                mpv = self.mpv.sounding()
+            self.tunes = (bool(pear), mpv)    # neither is announced in time for the next look
+        if not all(now):
             return
         if not was[0]:    # the music started
             self.tube.hush(videos)
@@ -942,7 +976,9 @@ class Handler(SimpleHTTPRequestHandler):
                 or self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             return self.send_error(403)
         try:
-            req = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 4096)))
+            req = json.loads(self.rfile.read(max(0, min(int(self.headers.get("Content-Length") or 0), 4096))))
+            if not isinstance(req, dict):
+                return self.send_error(400)
             if path == "/youtube":
                 if "open" in req and not TUBE.open(req["open"]):
                     return self.send_error(404, "not a video id, or no browser to open it in")
@@ -973,12 +1009,12 @@ class Handler(SimpleHTTPRequestHandler):
                 RADIO.stop()
             elif "play" in req and not RADIO.play(req["play"]):
                 return self.send_error(404, "unknown station, or mpv is not installed")
-        except (ValueError, TypeError, AttributeError, OSError, subprocess.SubprocessError):
+        except (ValueError, TypeError, AttributeError, ArithmeticError, OSError, subprocess.SubprocessError):    # 1e999 is a number too
             return self.send_error(400)
         self.send_json(json.dumps(RADIO.state()).encode(), local)
 
     def log_message(self, fmt, *args):
-        if not getattr(self, "path", "").startswith(("/mpris.json", "/radio", "/youtube", "/podcast", "/now.json", "/twitch")):    # unset on a malformed request
+        if not getattr(self, "path", "").startswith(("/mpris.json", "/radio", "/youtube", "/podcast", "/now", "/twitch")):    # unset on a malformed request
             super().log_message(fmt, *args)
 
 
@@ -988,7 +1024,7 @@ if __name__ == "__main__":
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--directory", default=".")
     ap.add_argument("--allow-origin", action="append", default=[], metavar="ORIGIN",
-                    help="another origin that may read /mpris.json, e.g. http://127.0.0.1:9875 (repeatable)")
+                    help="another origin that may read this server's endpoints, e.g. http://127.0.0.1:9875 (repeatable)")
     ap.add_argument("--radios", default=Path(__file__).resolve().parent.parent / "radios.json",
                     help="the station list for the remote's Radio tab (default: radios.json next to the pages)")
     ap.add_argument("--podcasts", default=Path(__file__).resolve().parent.parent / "podcasts.json",
@@ -1024,5 +1060,6 @@ if __name__ == "__main__":
             httpd.serve_forever()
         finally:
             MPV.stop()    # the radio and the podcast don't outlive their only remote control
+            PODS.save()    # where the episode was when it stopped
             if TURNS:
                 TURNS.stop()
