@@ -29,7 +29,7 @@ personal *Mixed for you* shelf (My Supermix, Discover Mix, My Mix 01…) and pla
 episodes and remembers where you stopped, a [YouTube](#youtube) tab lists your YouTube
 home page and controls the video in your browser, and a [Twitch](#twitch) tab lists the channels
 you follow that are live. When
-the dock is wider than it is tall, it switches to a side-by-side layout.
+the dock is at least 560 px wide and 4:3 or wider, it switches to a side-by-side layout.
 
 **Now Playing** (`now-playing.html`, a browser source): cover, title and artist. Long titles
 scroll, the card dims while paused and hides itself when nothing is playing. On Linux it can also
@@ -107,11 +107,13 @@ py -m http.server 9870 --bind 127.0.0.1 --directory C:\path\to\obs-pear-remote  
 - **Keep `--bind 127.0.0.1`.** The API server controls your playback, so the page holding its token
   should only be reachable from your own machine. Serving over `http://` rather than opening the
   files as `file://` also avoids the cross-origin and local-network restrictions of OBS's browser.
-- **Amuse does double duty.** The card reads everything from it; the remote uses it only as a
-  fallback for the current song until Pear sends its first player event.
+- **Amuse does double duty.** The card reads everything from Amuse, and the browser's video from
+  `serve.py`'s `/mpris.json`; the remote uses Amuse only as a fallback for the current song until
+  Pear sends its first player event.
 - **The dock reloads itself** whenever `pear-remote.html` changes on disk, since docks have no
   reload button. `?reload=0` turns that off.
-- **Search needs YouTube Music in English.** Results are filtered on its "Song" / "Video" labels.
+- **Search lists songs and videos only.** They are recognised by what their play button starts, so
+  YouTube Music's language doesn't matter.
 - **Pear 3.12.0 has two gaps.** It doesn't report repeat, mute or volume changes over its
   websocket, so those buttons work but never light up. And while a mix or radio plays, adding to
   the queue silently does nothing: Pear sends YouTube the current queue's context, and YouTube then
@@ -141,15 +143,16 @@ Pear can't play a stream, so `extras/serve.py` does, through [mpv](https://mpv.i
 
 The Podcasts tab lists the shows in `podcasts.json`, in French (Affaires sensibles, Distorsion,
 La Science CQFD, Underscore_, Le Collimateur…) and in English (Darknet Diaries, Hardcore History,
-99% Invisible, Song Exploder…). Click a show for its 40 latest episodes, read from its RSS feed;
-click an episode to play it. Like the radio it needs `extras/serve.py` and `mpv`, and it uses the
-same mpv, so a station and an episode never play together.
+99% Invisible, Song Exploder…). Click a show for the first 40 episodes of its RSS feed (feeds list
+the newest first); click an episode to play it. Like the radio it needs `extras/serve.py` and
+`mpv`, and it uses the same mpv, so a station and an episode never play together.
 
 - While an episode is on, the player is its player: play / pause, a seek bar you can click,
   previous / next jump 15 s back and 30 s forward, volume and mute.
 - **It remembers where you stopped.** Stop an episode (click it again, or start anything else) and
-  it resumes there next time, also after a restart; an episode heard to the end is marked played.
-  That memory is one small file, `~/.local/state/obs-pear-remote/podcasts-heard.json`.
+  it resumes there next time, also after a restart, once you are more than 10 seconds in; an
+  episode heard to the end is marked played. That memory is one small file,
+  `~/.local/state/obs-pear-remote/podcasts-heard.json`.
 - One thing plays at a time: starting an episode pauses Pear and the browser's video, and playing
   anything in Pear stops the episode (it keeps its place).
 - To add a show, add a line to `podcasts.json`: `id`, `group`, `name`, `note`, `feed` (the RSS
