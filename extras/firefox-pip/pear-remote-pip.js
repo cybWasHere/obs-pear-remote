@@ -18,7 +18,8 @@
 // closed with the stream paused, which is what the window's ✕ does.
 //
 // A Free TV channel (tv.free.fr) comes down it too, and is played in a tab that is on one: the
-// site is moved to the channel by its own router, as a click in its channel list does.
+// site is moved to the channel by its own router, without a load. Its player is built anew for
+// each channel, so the Picture-in-Picture window closes and opens again where it was.
 //
 // The same wait also brings the order to close the window: serve.py sends it when music starts
 // while a video or a stream plays, having paused it itself.
@@ -116,9 +117,25 @@
           watchEndpoint: { videoId: id } } }, content);
         app.dispatchEvent(new content.CustomEvent("yt-navigate", { detail, bubbles: true, composed: true }));
       }
-      if (go && (twitch || tv)) { // Twitch's router follows the address bar, and so does Free TV's
-        content.history.pushState(null, "", tv ? "/channel/" + id + "/play" : "/" + id);
+      if (go && twitch) { // Twitch's router follows the address bar
+        content.history.pushState(null, "", "/" + id);
         content.dispatchEvent(new content.PopStateEvent("popstate", { state: null }));
+      }
+      if (go && tv) {
+        // Free TV's router does too, but its player page reads the channel from the address only
+        // when it is put up. So: over to another page of the site (its search, where nothing
+        // plays), and back on the channel once the player is gone
+        const hop = path => {
+          content.history.replaceState(null, "", path);
+          content.dispatchEvent(new content.PopStateEvent("popstate", { state: null }));
+        };
+        const back = tries => {
+          if (!latest()) return; // a newer click is on its own way
+          if (tries && content.document.getElementById("PlayerVideoElement")) return setTimeout(() => back(tries - 1), 50);
+          hop("/channel/" + id + "/play");
+        };
+        hop("/home/search");
+        back(40);
       }
     } catch (e) { Cu.reportError(e); }
     const here = () => {

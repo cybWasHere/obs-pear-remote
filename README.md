@@ -235,7 +235,8 @@ never sees that login.
 - **A click plays the channel like a Twitch stream**: in your browser, and with
   `extras/firefox-pip/pear-remote-pip.js` in Firefox (see [YouTube](#youtube)) in the
   Picture-in-Picture window, from a background tab. The next channel takes the same tab, moved
-  there by the site's own router.
+  there by the site's own router in a second or two; the site builds each channel a new player,
+  so the window closes and opens again in the same place.
 - **The player shows the channel and its programme.** Play / pause pauses it and goes on,
   previous / next zap through the list, volume and mute work as for a video. *■ stop* on the
   channel's row pauses it and closes its window; play brings it back, window included.
