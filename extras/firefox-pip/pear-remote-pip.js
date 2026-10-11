@@ -120,9 +120,17 @@
     // times more) with no picture at all
     const until = Date.now() + (twitch ? 90000 : 20000);
     let stuck = 0;
+    // YouTube may load a video's page twice (the second time with &themeRefresh=1), and the window
+    // goes with the first document: the work is done per document, and watched until the end
+    let doc = content.document, shown = null; // shown: the document whose video has had its window
     const pip = () => {
       if (!latest()) return; // run again for this tab: two of these would open two windows
       try {
+        if (content.document !== doc) {
+          doc = content.document;
+          try { doc.notifyUserGestureActivation(); } catch (e) {}
+          asked(1); // the window asked for a moment ago was the last document's
+        }
         // The extension's player gives up on some channels ("this broadcast is encrypted") and
         // shows its report page. Twitch's own player, then, at the address the extension leaves alone
         if (twitch && content.location.protocol == "moz-extension:" && content.document.querySelector('iframe[src="report.html"]')) {
@@ -145,14 +153,15 @@
             // the window takes a moment to open: asking twice in that moment would open two
             if (!video.isCloningElementVisually) {
               // the window takes a moment to open: asking twice in that moment would open two.
-              // And one asked for while a stream changes channel may not come: ask again then
-              if (Date.now() - asked() > 3000) {
+              // And one asked for while a stream changes channel may not come: ask again then.
+              // Not for a video that has had its window: that one was closed by hand
+              if ((twitch || shown !== doc) && Date.now() - asked() > 3000) {
                 asked(Date.now());
                 actor.togglePictureInPicture({ video, reason: "Shortcut" });
               }
             } else if (!twitch) {
-              if (video.paused && !go) try { video.play(); } catch (e) {} // the one it was on, paused: go on
-              return;
+              if (shown !== doc && video.paused && !go) try { video.play(); } catch (e) {} // the one it was on, paused: go on
+              shown = doc;
             } else {
               // a stream that was paused in this tab stays paused, on the next channel too: when
               // Twitch's own button has said "paused" for a while, press it

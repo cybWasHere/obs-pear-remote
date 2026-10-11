@@ -1003,6 +1003,9 @@ if __name__ == "__main__":
     ap.add_argument("--let-both-play", action="store_true",
                     help="don't pause the browser's video or stream when music starts, nor the music when the video starts")
     a = ap.parse_args()
+    local = str(Path.home() / ".local/bin")    # pip/pipx put yt-dlp there; a systemd user unit started at boot lacks it
+    if local not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = os.pathsep.join(filter(None, [os.environ.get("PATH"), local]))
     ALLOWED.update(o.rstrip("/") for o in a.allow_origin)
     MPV = Mpv()
     RADIO = Radio(MPV, a.radios)
