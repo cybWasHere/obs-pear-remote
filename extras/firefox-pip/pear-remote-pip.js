@@ -1,4 +1,4 @@
-// Pear Remote, YouTube and Twitch tabs: play the clicked video or stream in Firefox's
+// Pear Remote, YouTube, Twitch and TV tabs: play the clicked video, stream or channel in Firefox's
 // Picture-in-Picture window, in the place of whatever that window was showing, instead of opening
 // a new tab each time.
 //
@@ -16,6 +16,9 @@
 // What is new there: serve.py opens Chatterino next to the stream, so it is told (POST /twitch)
 // when the stream is closed: its tab closed or gone elsewhere, or its Picture-in-Picture window
 // closed with the stream paused, which is what the window's ✕ does.
+//
+// A Free TV channel (tv.free.fr) comes down it too, and is played in a tab that is on one: the
+// site is moved to the channel by its own router, as a click in its channel list does.
 //
 // The same wait also brings the order to close the window: serve.py sends it when music starts
 // while a video or a stream plays, having paused it itself.
@@ -59,10 +62,18 @@
     } catch (e) {}
     return null; // not on a Twitch channel
   };
+  const tvOf = browser => {
+    try {
+      const uri = browser.currentURI;
+      if (uri.host == "tv.free.fr") return /^\/channel\/(\d{1,6})\/play\/?$/.exec(uri.filePath)?.[1] ?? null;
+    } catch (e) {}
+    return null; // not on a Free TV channel
+  };
   // what a tab is on, per site, and the address of a video or a channel there
   const SITES = {
     youtube: { at: videoOf, url: id => "https://www.youtube.com/watch?v=" + id },
     twitch: { at: channelOf, url: name => "https://www.twitch.tv/" + name },
+    tv: { at: tvOf, url: id => "https://tv.free.fr/channel/" + id + "/play" },
   };
 
   // The tab behind a Picture-in-Picture window. Firefox keeps that in a module whose address has
@@ -94,32 +105,33 @@
   // one to put, by the same call as the keyboard shortcut.
   const inPage = (kind, id, go, latest, ext, asked) => {
     const { setTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
-    const twitch = kind == "twitch";
+    const twitch = kind == "twitch", tv = kind == "tv", began = Date.now();
     // the click was on the remote, not in this page: without it Firefox lets a new tab play muted at best
     try { content.document.notifyUserGestureActivation(); } catch (e) {}
     try {
-      const app = go && !twitch && content.document.querySelector("ytd-app");
+      const app = go && kind == "youtube" && content.document.querySelector("ytd-app");
       if (app) {
         const detail = Cu.cloneInto({ endpoint: {
           commandMetadata: { webCommandMetadata: { url: "/watch?v=" + id, webPageType: "WEB_PAGE_TYPE_WATCH", rootVe: 3832 } },
           watchEndpoint: { videoId: id } } }, content);
         app.dispatchEvent(new content.CustomEvent("yt-navigate", { detail, bubbles: true, composed: true }));
       }
-      if (go && twitch) { // Twitch's router follows the address bar
-        content.history.pushState(null, "", "/" + id);
+      if (go && (twitch || tv)) { // Twitch's router follows the address bar, and so does Free TV's
+        content.history.pushState(null, "", tv ? "/channel/" + id + "/play" : "/" + id);
         content.dispatchEvent(new content.PopStateEvent("popstate", { state: null }));
       }
     } catch (e) { Cu.reportError(e); }
     const here = () => {
       const at = content.location;
+      if (tv) return at.pathname.replace(/\/$/, "") == "/channel/" + id + "/play";
       if (!twitch) return at.search.includes("v=" + id);
       if (at.protocol == "moz-extension:") return new RegExp("[?&]channel=" + id + "(&|$)", "i").test(at.search); // the extension's player
       return at.pathname.replace(/\/$/, "").toLowerCase() == "/" + id;
     };
     // a stream can take long to show: the Twitch extension sits out an ad (half a minute, at
-    // times more) with no picture at all
-    const until = Date.now() + (twitch ? 90000 : 20000);
-    let stuck = 0;
+    // times more) with no picture at all; Free TV may show one before a channel, too
+    const until = Date.now() + (twitch || tv ? 90000 : 20000);
+    let stuck = 0, steady = 0;
     // YouTube may load a video's page twice (the second time with &themeRefresh=1), and the window
     // goes with the first document: the work is done per document, and watched until the end
     let doc = content.document, shown = null; // shown: the document whose video has had its window
@@ -138,7 +150,8 @@
         }
         if (here()) {
           const actor = content.windowGlobalChild.getActor("PictureInPictureLauncher");
-          const video = actor.findVideoToPiP(content.document);
+          // Free TV's page has a second, hidden <video> besides its player's
+          const video = tv && content.document.getElementById("PlayerVideoElement") || actor.findVideoToPiP(content.document);
           // The extension's player, stopped (its page says so: states 7 and 8): by quiet() when
           // something else took over, or by itself when Firefox refused its first try to play.
           // Its button starts it again, live. Not pressed twice within its start
@@ -152,13 +165,24 @@
           if (video && (video.videoWidth && video.videoHeight || video.isCloningElementVisually)) {
             // the window takes a moment to open: asking twice in that moment would open two
             if (!video.isCloningElementVisually) {
+              steady = 0;
               // the window takes a moment to open: asking twice in that moment would open two.
               // And one asked for while a stream changes channel may not come: ask again then.
               // Not for a video that has had its window: that one was closed by hand
-              if ((twitch || shown !== doc) && Date.now() - asked() > 3000) {
+              if ((twitch || tv || shown !== doc) && Date.now() - asked() > 3000) {
                 asked(Date.now());
                 actor.togglePictureInPicture({ video, reason: "Shortcut" });
               }
+            } else if (tv) {
+              // Free TV may build the next channel a player of its own, and the window goes with
+              // the old one: after a move, watch until one has played in its window for a while.
+              // A channel that was paused goes on
+              if (!video.paused) {
+                stuck = 0;
+                steady ||= Date.now();
+                if (!go || Date.now() - began > 6000 && Date.now() - steady > 5000) return;
+              } else if (!stuck) stuck = Date.now();
+              else if (Date.now() - stuck > 1500) { stuck = 0; try { video.play(); } catch (e) {} }
             } else if (!twitch) {
               if (shown !== doc && video.paused && !go) try { video.play(); } catch (e) {} // the one it was on, paused: go on
               shown = doc;
@@ -262,9 +286,9 @@
       if (t.soundPlaying && t.linkedBrowser !== browser && Object.values(SITES).some(s => s.at(t.linkedBrowser) !== null)) quiet(t.linkedBrowser);
     }
     if (kind == "twitch") watchStream(tab, id);
-    // Twitch starts no player in a tab that isn't looked at. Firefox counts a tab as looked at
+    // Twitch starts no player in a tab that isn't looked at (Free TV is treated alike). Firefox counts a tab as looked at
     // while its video is in Picture-in-Picture; say so a moment early
-    const show = () => { if (kind == "twitch" && !tab.selected) try { browser.docShellIsActive = true; } catch (e) {} };
+    const show = () => { if (kind != "youtube" && !tab.selected) try { browser.docShellIsActive = true; } catch (e) {} };
     show();
     let spec = null; // the address the page was at when the work in it was last started
     const start = go => { spec = browser.currentURI.spec; run(browser, kind, id, go); };
@@ -318,7 +342,7 @@
     }
   }
 
-  // Close the Picture-in-Picture windows that show a YouTube video or a Twitch stream (and those
+  // Close the Picture-in-Picture windows that show a YouTube video, a Twitch stream or a TV channel (and those
   // whose tab can't be told). It goes back to its tab, paused as serve.py left it.
   function closePip() {
     for (const w of pipWindows()) {
@@ -339,6 +363,7 @@
         else if (d.seq !== seq) {
           if (d.close) closePip();
           else if (/^\w{2,25}$/.test(d.twitch || "")) open("twitch", d.twitch.toLowerCase()).catch(Cu.reportError);
+          else if (/^\d{1,6}$/.test(d.tv || "")) open("tv", d.tv).catch(Cu.reportError);
           else if (/^[\w-]{11}$/.test(d.id || "")) open("youtube", d.id).catch(Cu.reportError);
         }
         seq = d.seq;

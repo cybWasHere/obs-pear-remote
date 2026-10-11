@@ -27,8 +27,8 @@ end. With an optional [Pear patch](#mixed-for-you-optional-pear-patch), a third 
 personal *Mixed for you* shelf (My Supermix, Discover Mix, My Mix 01…) and plays those too. A
 [Radio](#radio) tab plays internet radio stations, a [Podcasts](#podcasts) tab plays podcast
 episodes and remembers where you stopped, a [YouTube](#youtube) tab lists your YouTube
-home page and controls the video in your browser, and a [Twitch](#twitch) tab lists the channels
-you follow that are live. When
+home page and controls the video in your browser, a [Twitch](#twitch) tab lists the channels
+you follow that are live, and a [TV](#tv-free-tv) tab plays the French channels of Free TV. When
 the dock is at least 560 px wide and 4:3 or wider, it switches to a side-by-side layout.
 
 **Now Playing** (`now-playing.html`, a browser source): cover, title and artist. Long titles
@@ -222,6 +222,25 @@ again to refresh it.
 - **One thing plays at a time** here too: a stream with sound and music take turns, as in
   [YouTube](#youtube). Music starting pauses the stream and closes its window, and so Chatterino.
 
+## TV (Free TV)
+
+The TV tab is [Free TV](https://tv.free.fr/), Free's live TV website (France; a free account is
+enough for the main channels). It needs `extras/serve.py` started with `--free-tv`; without that
+option the tab stays hidden. You must be signed in to tv.free.fr in your browser: the server
+never sees that login.
+
+- **The list** is `tv.json`: the 25 national channels, each with what is on right now, read from
+  Free's public programme guide once an hour. Edit the file to add or drop channels (`id` is the
+  number in the channel's address, `tv.free.fr/channel/<id>/play`); no restart needed.
+- **A click plays the channel like a Twitch stream**: in your browser, and with
+  `extras/firefox-pip/pear-remote-pip.js` in Firefox (see [YouTube](#youtube)) in the
+  Picture-in-Picture window, from a background tab. The next channel takes the same tab, moved
+  there by the site's own router.
+- **The player shows the channel and its programme.** Play / pause pauses it and goes on,
+  previous / next zap through the list, volume and mute work as for a video. *■ stop* on the
+  channel's row pauses it and closes its window; play brings it back, window included.
+- **One thing plays at a time** here too, as in [YouTube](#youtube).
+
 ## Mixed for you (optional Pear patch)
 
 Your personal mixes need your YouTube login, and Pear's API can't queue a playlist or read your
@@ -324,6 +343,7 @@ have no such field, so the remote needs a theme block.
 | **YouTube tab: "yt-dlp returned no videos"** | You aren't signed in to YouTube in the browser you named, or yt-dlp is too old for today's YouTube: update it. |
 | **Twitch tab: "start serve.py with --twitch"** | The list is opt-in: it borrows Chatterino's login. See [Twitch](#twitch). |
 | **Twitch tab: "no Twitch login found"** | Chatterino isn't installed, or not signed in. |
+| **TV tab: the channel's tab shows "Se connecter"** | Sign in to tv.free.fr in that browser, once. |
 | **Mixes tab: "Pear needs the pear-mixes patch"** | Pear isn't patched, or an update replaced `app.asar` without the hook. See [Mixed for you](#mixed-for-you-optional-pear-patch). |
 | **The card ignores your edits** | OBS caches the page (Python's server sends no cache headers). In the source's properties, click *Refresh cache of current page*. |
 | **Windows: "Python 3 was not found, or it does not start"** | `py` or `python` points at a Python that was uninstalled. Reinstall it from python.org. |

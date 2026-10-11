@@ -15,6 +15,8 @@
      needs extras/serve.py too (Linux, and --youtube-cookies for the home page).
      The Twitch tab lists the channels you follow that are live and opens them the same way, with
      Chatterino on the chat (serve.py --twitch).
+     The TV tab is Free TV (tv.free.fr): the channels of tv.json with what is on, played in your
+     browser the same way (serve.py --free-tv; the tab stays hidden without it).
      Options: ?api=http://127.0.0.1:26538 (API Server address), &client=obs-pear-remote (name
      shown in Pear's authorize prompt), &amuse=http://127.0.0.1:9863/query (0 = off),
      &theme=ferra|midnight, &ambient=1|0 (colours from the current cover; without it the droplet
@@ -98,6 +100,7 @@
   .item.cur .t { color: var(--accent); }
   .item img { width: 36px; height: 36px; border-radius: 4px; object-fit: cover; flex: none; background: var(--sunken); }
   .item.video img { width: 64px; }   /* YouTube thumbnails are 16:9 */
+  .item.tv img { object-fit: contain; background: none; }   /* a channel's logo, whole */
   .item .txt { min-width: 0; flex: 1; }
   .item .t, .item .s { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .item .s { color: var(--muted); font-size: 11px; }
@@ -166,6 +169,7 @@
   <button id="tabPods" class="tab" title="Podcasts"><svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2Z"/></svg></button>
   <button id="tabTube" class="tab" title="YouTube: your home page, opened in your browser"><svg viewBox="0 0 24 24"><path d="M21.6 7.2a2.5 2.5 0 0 0-1.8-1.8C18.2 5 12 5 12 5s-6.2 0-7.8.4a2.5 2.5 0 0 0-1.8 1.8C2 8.8 2 12 2 12s0 3.2.4 4.8a2.5 2.5 0 0 0 1.8 1.8c1.6.4 7.8.4 7.8.4s6.2 0 7.8-.4a2.5 2.5 0 0 0 1.8-1.8c.4-1.6.4-4.8.4-4.8s0-3.2-.4-4.8ZM10 15V9l5.2 3-5.2 3Z"/></svg></button>
   <button id="tabTwitch" class="tab" title="Twitch: the live channels you follow"><svg viewBox="0 0 24 24"><path d="M5 2 3 6.5V20h4.5v2.5H10l2.5-2.5h3.6L21 15.1V2H5Zm14 12.2-2.8 2.8h-4.4l-2.4 2.4V17H5.8V3.8H19v10.4ZM16.3 7.4v5h-1.7v-5h1.7Zm-4.5 0v5h-1.7v-5h1.7Z"/></svg></button>
+  <button id="tabTv" class="tab" style="display: none" title="TV: Free TV's channels and what is on"><svg viewBox="0 0 24 24"><path d="M21 5h-6.6l2.3-2.3-1.4-1.4L12 4.6 8.7 1.3 7.3 2.7 9.6 5H3a2 2 0 0 0-2 2v11c0 1.1.9 2 2 2h18a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 13H3V7h18v11Z"/></svg></button>
   <button id="tabSearch" class="tab" title="Search"><svg viewBox="0 0 24 24"><path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5Zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9Z"/></svg></button>
   <div id="search"><input id="q" placeholder="search, Enter…" autocomplete="off"></div>
   <span id="tabLabel">queue</span>
@@ -190,7 +194,7 @@ const st = { song: null, playing: false, position: 0, posAt: 0, volume: null, mu
              pod: { available: false, now: {}, volume: 100, muted: false, shows: [] }, podAt: 0,
              podNote: "loading…", podShow: null, podEps: null,
              tube: { now: {}, home: false }, tubeAt: 0, home: [], homeNote: "loading…",
-             live: [], liveNote: "loading…" };
+             live: [], liveNote: "loading…", tv: [], tvNote: "loading…" };
 
 // ---- api ----
 // every /auth request can pop Pear's authorize prompt, so share one request between callers
@@ -251,7 +255,7 @@ function renderSong() {
   const v = onTube();
   if (v) {   // and so does a video in the browser, while Pear is quiet
     $("title").textContent = v.title;
-    $("artist").textContent = v.author || (v.kind === "twitch" ? "Twitch" : "YouTube");
+    $("artist").textContent = v.author || (v.kind === "twitch" ? "Twitch" : v.kind === "tv" ? "Free TV" : "YouTube");
     if ($("cover").src !== v.cover) $("cover").src = v.cover;
     ambient(v.cover);
     $("dur").textContent = v.length ? fmt(v.length) : "";
@@ -373,9 +377,9 @@ function renderControls() {
   $("playIcon").setAttribute("d", radio ? "M6 6h12v12H6z"
     : (e ? !e.paused : v ? v.playing : st.playing) ? "M6 5h4v14H6zm8 0h4v14h-4z" : "M8 5v14l11-7z");
   $("play").title = radio ? "Stop the radio" : "Play / pause";
-  const live = v && v.kind === "twitch";
-  $("prev").title = radio ? "Previous station" : e ? "Back 15 s" : live ? "Previous live channel" : v ? "Back 10 s" : "Previous";
-  $("next").title = radio ? "Next station" : e ? "Forward 30 s" : live ? "Next live channel" : v ? "Forward 10 s" : "Next";
+  const live = v && v.kind === "twitch", tv = v && v.kind === "tv";
+  $("prev").title = radio ? "Previous station" : e ? "Back 15 s" : live ? "Previous live channel" : tv ? "Previous channel" : v ? "Back 10 s" : "Previous";
+  $("next").title = radio ? "Next station" : e ? "Forward 30 s" : live ? "Next live channel" : tv ? "Next channel" : v ? "Forward 10 s" : "Next";
   $("shuffle").classList.toggle("on", st.shuffle);
   $("repeat").classList.toggle("on", st.repeat !== "NONE");
   $("repeatTag").textContent = st.repeat === "ONE" ? "1" : "";
@@ -499,6 +503,12 @@ function renderList() {
     if (!st.live.length) { list.innerHTML = `<div class="empty"></div>`; list.firstChild.textContent = st.liveNote; return; }
     for (const c of st.live) list.append(row(c.thumb, [c.name, c.game].filter(Boolean).join("  ·  "), `${viewers(c.viewers)}  ${c.title}`,
       onLive(c) ? "video cur" : "video", () => openLive(c)));
+    list.scrollTop = top;
+  } else if (st.tab === "tv") {
+    if (!st.tv.length) { list.innerHTML = `<div class="empty"></div>`; list.firstChild.textContent = st.tvNote; return; }
+    for (const c of st.tv) list.append(row(c.logo, `${c.number}  ${c.name}`, [c.start && `${clock(c.start)}–${clock(c.end)}`, c.title, c.what].filter(Boolean).join("  "),
+      onTv(c) ? "tv cur" : "tv", () => openTv(c),
+      onTv(c) && st.tube.now.playing ? [["■ stop", "pause it and close its Picture-in-Picture window", stopTv]] : []));
     list.scrollTop = top;
   } else {
     if (!st.results.length) { list.innerHTML = `<div class="empty">type something and press Enter</div>`; return; }
@@ -694,12 +704,13 @@ const onTube = () => !onAir() && !onPod() && tubeOn && st.tube.now.id ? st.tube.
 const tubePos = () => st.tube.now.position + (st.tube.now.playing ? (performance.now() - st.tubeAt) / 1000 : 0);
 
 function applyTube(d) {
-  const was = st.tube.now.id;
+  const was = st.tube.now.id, playing = st.tube.now.playing;
   st.tube = d; st.tubeAt = performance.now();
   tubeOn = !!d.now.id && !st.playing && (d.now.playing || tubeOn);
   if (d.now.volume) tubeVol = d.now.volume;
   renderSong(); renderControls();
   if ((st.tab === "youtube" || st.tab === "twitch") && was !== d.now.id) renderList();
+  if (st.tab === "tv" && (was !== d.now.id || playing !== d.now.playing)) renderList();   // its stop button comes and goes
 }
 
 async function loadTube() {
@@ -781,6 +792,48 @@ async function openLive(c) {
 function stepLive(by) {
   const i = st.live.findIndex(onLive);
   if (st.live.length) openLive(st.live[(Math.max(i, 0) + by + st.live.length) % st.live.length]);
+}
+
+// ---- tv ----
+// Free TV (tv.free.fr): the channels of tv.json with what is on each, as extras/serve.py reads it
+// from Free's programme guide. A channel is a video in your browser like a stream: it plays in
+// Picture-in-Picture, and previous / next zap through the list.
+const onTv = c => st.tube.now.kind === "tv" && st.tube.now.id === c.id;
+const clock = t => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+
+async function loadTv() {
+  try {
+    const d = await (await fetch("/tv.json", { cache: "no-store" })).json();
+    st.tv = d.items; st.tvNote = d.note || "no channels";
+    $("tabTv").style.display = d.on ? "" : "none";
+    if (d.items.length && d.note) status(d.note, true);
+  } catch { }   // an older serve.py, or none: no TV tab
+  if (st.tab === "tv") renderList();
+}
+
+async function tv(body) {
+  try {
+    const r = await fetch("/tv", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error("tv " + r.status);
+    applyTube(await r.json());
+    setTimeout(loadTube, 500);
+    return true;
+  } catch (e) { status(e.message, true); return false; }
+}
+
+async function openTv(c) {
+  status(`opening: ${c.name}`);
+  if (!(await tv({ open: c.id }))) return;
+  if (st.playing) { st.playing = false; act("pause"); }   // one thing plays at a time
+  if (st.radio.playing) radio({ stop: true });
+  if (onPod()) pod({ stop: true });
+}
+
+const stopTv = () => tv({ stop: true });
+
+function stepTv(by) {
+  const i = st.tv.findIndex(onTv);
+  if (st.tv.length) openTv(st.tv[(Math.max(i, 0) + by + st.tv.length) % st.tv.length]);
 }
 
 // ---- youtube music data ----
@@ -959,11 +1012,13 @@ async function amuseFallback() {
 $("play").onclick = () => {
   if (onAir()) return radio({ stop: true });
   if (onPod()) return pod({ toggle: true });
-  if (onTube()) return tube({ toggle: true });
+  const v = onTube(), c = v && v.kind === "tv" && !v.playing && st.tv.find(onTv);
+  if (c) return openTv(c);   // a paused channel goes on in its Picture-in-Picture window, which a stop closed
+  if (v) return tube({ toggle: true });
   st.playing = !st.playing; renderControls(); act("toggle-play");
 };
 const step = (by, radioBy, podBy, tubeBy, pear) => onAir() ? stepRadio(radioBy) : onPod() ? pod({ skip: podBy })
-  : onTube() ? (onTube().kind === "twitch" ? stepLive(by) : tube({ skip: tubeBy })) : act(pear);
+  : onTube() ? (onTube().kind === "twitch" ? stepLive(by) : onTube().kind === "tv" ? stepTv(by) : tube({ skip: tubeBy })) : act(pear);
 $("next").onclick = () => step(1, 1, 30, 10, "next");
 $("prev").onclick = () => step(-1, -1, -15, -10, "previous");
 $("like").onclick = () => act("like").then(() => setTimeout(loadLike, 300));
@@ -1004,11 +1059,12 @@ function setTab(t) {
   $("tabPods").classList.toggle("on", t === "podcasts");
   $("tabTube").classList.toggle("on", t === "youtube");
   $("tabTwitch").classList.toggle("on", t === "twitch");
+  $("tabTv").classList.toggle("on", t === "tv");
   $("tabSearch").classList.toggle("on", t === "search");
   $("search").classList.toggle("on", t === "search");
   $("tabLabel").textContent = t === "search" ? "" : t;
   if (t === "search") $("q").focus(); else if (t === "mixes") loadMixes(); else if (t === "radio") loadRadio();
-  else if (t === "podcasts") { loadPod(); if (st.podShow) openShow(st.podShow); } else if (t === "youtube") loadHome(); else if (t === "twitch") loadLive(); else loadQueue();
+  else if (t === "podcasts") { loadPod(); if (st.podShow) openShow(st.podShow); } else if (t === "youtube") loadHome(); else if (t === "twitch") loadLive(); else if (t === "tv") loadTv(); else loadQueue();
   renderList();
 }
 $("tabQueue").onclick = () => setTab("queue");
@@ -1017,6 +1073,7 @@ $("tabRadio").onclick = () => setTab("radio");
 $("tabPods").onclick = () => { if (st.tab === "podcasts") st.podShow = st.podEps = null; setTab("podcasts"); };   // again = back to the shows
 $("tabTube").onclick = () => st.tab === "youtube" ? loadHome(true) : setTab("youtube");   // again = refresh
 $("tabTwitch").onclick = () => st.tab === "twitch" ? loadLive(true) : setTab("twitch");   // again = refresh
+$("tabTv").onclick = () => setTab("tv");
 $("tabSearch").onclick = () => setTab("search");
 $("ambient").onclick = () => { setAmbient(!ambientOn); localStorage.setItem("ambient", ambientOn ? "1" : "0"); };
 $("q").onkeydown = async e => {
@@ -1048,6 +1105,7 @@ loadRadio(); setInterval(loadRadio, 4000);
 loadPod(); setInterval(loadPod, 2000);
 watchTube();
 setInterval(() => { if (st.tab === "twitch") loadLive(); }, 60000);   // who is live changes by itself
+loadTv(); setInterval(() => { if (st.tab === "tv") loadTv(); }, 60000);   // and so does what is on
 requestAnimationFrame(tick);
 </script>
 </body>

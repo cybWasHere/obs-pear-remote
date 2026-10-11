@@ -34,9 +34,14 @@ the way a YouTube video is played, and opens Chatterino on that channel's chat; 
 again when the stream is (extras/firefox-pip says when). A Chatterino you started yourself is left
 alone, both ways. --no-twitch-chat keeps Chatterino out of it.
 
+The TV tab is Free TV (tv.free.fr), off until you say --free-tv: GET /tv.json is the channels in
+tv.json with what is on each right now, from Free's public programme guide. POST /tv with
+{"open": channel id} plays one in the browser the way a stream is played (you must be signed in to
+tv.free.fr there), {"stop": true} pauses it and closes its Picture-in-Picture window.
+
 One thing plays at a time (Linux, where MPRIS says who is playing): start a song in Pear, a station
-or an episode while a YouTube video or a Twitch stream plays in your browser, and the video is paused and its
-Picture-in-Picture window closed (closing it is extras/firefox-pip's work); start the video again,
+or an episode while a YouTube video, a Twitch stream or a TV channel plays in your browser, and the video is
+paused and its Picture-in-Picture window closed (closing it is extras/firefox-pip's work); start the video again,
 and the music is paused. --let-both-play turns that off.
 """
 import argparse, functools, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time
@@ -51,6 +56,7 @@ MPRIS_PATH, MPRIS_PLAYER = "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Pl
 WATCH = re.compile(r"^https://(www\.|m\.)?youtube\.com/(watch|shorts/|live/)|^https://youtu\.be/")
 CHANNEL = re.compile(r"^https://(?:www\.|m\.)?twitch\.tv/(\w{2,25})/?(?:[?#]|$)")
 PLAYER = re.compile(r"^moz-extension://[^/]+/player\.html\?(?:[^#]*&)?channel=(\w{2,25})(?:[&#]|$)")
+TVPLAY = re.compile(r"^https://tv\.free\.fr/channel/(\d{1,6})/play/?(?:[?#]|$)")
 NOT_CHANNELS = {"directory", "videos", "settings", "search", "downloads", "subscriptions", "inventory", "drops",
                 "wallet", "friends", "turbo", "jobs", "store", "prime", "login", "signup", "following"}
 _cache = (0.0, b"{}")
@@ -82,6 +88,12 @@ def channel(url):
     return m.group(1).lower() if m else None
 
 
+def tv_channel(url):
+    """The Free TV channel a page plays, as the text of its number there; None for any other address."""
+    m = TVPLAY.match(url)
+    return m.group(1) if m else None
+
+
 def players():
     """Every MPRIS player: (bus name, properties, metadata)."""
     try:
@@ -105,8 +117,8 @@ def players():
 
 
 def video_players():
-    """Every MPRIS player that is on a YouTube video or a Twitch stream, playing or not: (bus name,
-    properties, metadata, what the pages show of it)."""
+    """Every MPRIS player that is on a YouTube video, a Twitch stream or a Free TV channel, playing
+    or not: (bus name, properties, metadata, what the pages show of it)."""
     for name, p, meta in players():
         url = meta.get("xesam:url", "")
         author = ", ".join(a for a in meta.get("xesam:artist", []) if a)
@@ -121,6 +133,12 @@ def video_players():
                                   "author": live.get("name") or author or channel(url),
                                   "title": live.get("title") or re.sub(r" - Twitch$", "", meta.get("xesam:title", "")),
                                   "cover": live.get("thumb") or Twitch.thumb(channel(url))}
+        elif tv_channel(url):
+            on = TV.known(tv_channel(url)) if TV else {}
+            yield name, p, meta, {"kind": "tv", "id": tv_channel(url), "url": url,
+                                  "author": on.get("name") or author or "Free TV",
+                                  "title": on.get("title") or re.sub(r"^Free TV$", "", meta.get("xesam:title", "")) or on.get("name", ""),
+                                  "cover": on.get("thumb") or on.get("logo") or ""}
 
 
 def youtube_players():
@@ -151,6 +169,7 @@ class Tube:
         self.asked = threading.Condition()    # the video to open, for a browser that waits for it
         self.seq, self.asked_id = int(time.time() * 1000), None    # seq never repeats across restarts
         self.asked_twitch = None    # or the channel to open
+        self.asked_tv = None    # or the TV channel
         self.born = self.seq
         self.waiting, self.waited_at = 0, 0.0
 
@@ -181,7 +200,7 @@ class Tube:
 
     def hush(self, names=None):
         """Pause every video and stream that plays (or the players named), and close the
-        Picture-in-Picture window: music is starting."""
+        Picture-in-Picture window: music is starting, or the TV was stopped."""
         if names is None:
             names = [name for name, p, _, _ in video_players() if p.get("PlaybackStatus") == "Playing"]
         for name in names:
@@ -212,11 +231,11 @@ class Tube:
             return False
         return self.ask(vid, None) or self.browse(f"https://www.youtube.com/watch?v={vid}")
 
-    def ask(self, vid, twitch):
+    def ask(self, vid, twitch, tv=None):
         """Hand the waiting browser a video or a channel; False when no browser waits."""
         with self.asked:
             if self.waiting or time.monotonic() - self.waited_at < 8:    # between two waits counts
-                self.seq, self.asked_id, self.asked_twitch = self.seq + 1, vid, twitch
+                self.seq, self.asked_id, self.asked_twitch, self.asked_tv = self.seq + 1, vid, twitch, tv
                 self.asked.notify_all()
                 return True    # the browser puts it where the last video was
         return False
@@ -235,27 +254,27 @@ class Tube:
     def close_pip(self):
         """Tell the waiting browser to close its Picture-in-Picture window: an order with no video."""
         with self.asked:
-            self.seq, self.asked_id, self.asked_twitch = self.seq + 1, None, None
+            self.seq, self.asked_id, self.asked_twitch, self.asked_tv = self.seq + 1, None, None, None
             self.asked.notify_all()
 
     def wait_open(self, after):
         """Long poll: the last video asked for, as soon as it isn't number `after` (25 s at most).
-        "twitch" instead of an id: the channel to open. "close" instead of both: close the
-        Picture-in-Picture window."""
+        "twitch" instead of an id: the channel to open; "tv": the Free TV channel. "close" instead
+        of the three: close the Picture-in-Picture window."""
         with self.asked:
             if not self.born <= after <= self.seq:
                 # a number from before this server started: nothing was asked since, and least of
                 # all to close the window of a video that plays
                 self.waited_at = time.monotonic()
-                return {"seq": self.seq, "id": None, "twitch": None, "close": False}
+                return {"seq": self.seq, "id": None, "twitch": None, "tv": None, "close": False}
             self.waiting += 1
             try:
                 self.asked.wait_for(lambda: self.seq != after, 25)
             finally:
                 self.waiting -= 1
                 self.waited_at = time.monotonic()
-            return {"seq": self.seq, "id": self.asked_id, "twitch": self.asked_twitch,
-                    "close": self.asked_id is None and self.asked_twitch is None}
+            return {"seq": self.seq, "id": self.asked_id, "twitch": self.asked_twitch, "tv": self.asked_tv,
+                    "close": self.asked_id is None and self.asked_twitch is None and self.asked_tv is None}
 
     def home(self, fresh=False):
         """Your home page's videos, as yt-dlp's ":ytrec" reads them with the browser's login. Kept
@@ -443,6 +462,75 @@ class Twitch:
             quiet = time.monotonic() - max(self.started, self.opened_at) > 60
             if quiet and not self.tube.listening() and any(on for _, on in self.chatterinos()):
                 self.close_chat()
+
+
+class Tv:
+    """The remote's TV tab: Free TV (tv.free.fr) in your browser. The channels come from tv.json
+    (id as Free numbers them, number, name, logo) and are named by id, so a page can't send the
+    browser anywhere else. What is on comes from Free's programme guide, which anyone may read; to
+    watch, the browser must be signed in to tv.free.fr."""
+    GUIDE = "https://api.oqee.net/api/v1/epg/all/%d"    # every channel's programmes of the hour that starts then
+
+    def __init__(self, tube, path, on):
+        self.tube, self.path, self.on = tube, Path(path), on
+        self.lock = threading.Lock()
+        self.hour, self.at, self.guide, self.note = 0, 0.0, {}, ""
+
+    def channels(self):
+        try:    # read every time, as the stations are
+            return [c for c in json.loads(self.path.read_text(encoding="utf-8")) if re.fullmatch(r"\d{1,6}", str(c.get("id")))]
+        except (OSError, ValueError, AttributeError, TypeError):
+            return []
+
+    def _guide(self):
+        """{channel id: its programmes this hour}; asked once an hour, and after a failure not
+        again for a minute."""
+        hour = int(time.time()) // 3600 * 3600
+        with self.lock:
+            if hour != self.hour and time.monotonic() - self.at > 60:
+                self.at = time.monotonic()
+                try:
+                    req = urllib.request.Request(self.GUIDE % hour, headers={"User-Agent": "obs-pear-remote (TV tab)"})
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        entries = json.load(r)["result"]["entries"]
+                    self.guide = {str(k): [e["live"] | {"thumb": (e.get("pictures") or {}).get("main", "").replace("%d", "180")}
+                                           for e in v if isinstance(e.get("live"), dict)] for k, v in entries.items()}
+                    self.hour, self.note = hour, ""
+                except (OSError, ValueError, LookupError, TypeError, AttributeError) as e:
+                    self.note = f"couldn't read Free's programme guide: {e}"[:200]    # and keep the last one
+            return self.guide
+
+    def items(self):
+        guide, now, out = self._guide() if self.on else {}, time.time(), []
+        for c in self.channels():
+            on = next((p for p in guide.get(str(c["id"]), []) if p.get("start", 0) <= now < p.get("end", 0)), {})
+            out.append({"id": str(c["id"]), "number": c.get("number", ""), "name": c.get("name", ""),
+                        "logo": str(c.get("logo", "")).replace("%d", "96"), "title": on.get("title", ""),
+                        "what": on.get("sub_category") or on.get("category") or "", "thumb": on.get("thumb", ""),
+                        "start": on.get("start", 0), "end": on.get("end", 0)})
+        return out
+
+    def known(self, cid):
+        """A channel with what is on it now; {} for one that isn't in tv.json."""
+        return next((i for i in self.items() if i["id"] == cid), {})
+
+    def state(self):
+        if not self.on:
+            return {"on": False, "items": [], "note": "to list Free TV's channels, start serve.py with --free-tv"}
+        items = self.items()
+        return {"on": True, "items": items, "note": self.note if items else "no channels in tv.json"}
+
+    def open(self, cid):
+        cid = str(cid)
+        if not self.on or not any(str(c["id"]) == cid for c in self.channels()):
+            return False
+        return self.tube.ask(None, None, cid) or self.tube.browse(f"https://tv.free.fr/channel/{cid}/play")
+
+    def stop(self):
+        """Pause the channel that plays and close its window. A paused channel waits where it is:
+        Free lets it go on from there, or from the live when it is opened again."""
+        self.tube.hush([name for name, p, _, v in video_players()
+                        if v["kind"] == "tv" and p.get("PlaybackStatus") == "Playing"])
 
 
 class Mpv:
@@ -737,7 +825,7 @@ class Podcasts:
 
 class Turns:
     """One thing plays at a time. Music is Pear (over MPRIS) or this server's mpv; the video is a
-    YouTube one or a Twitch stream in the browser. Whichever of the two starts while the other
+    YouTube one, a Twitch stream or a TV channel in the browser. Whichever of the two starts while the other
     plays, the other is paused. Pear and the mpv take turns with each other the same way. Only a
     start counts: what already played together when this began is left alone."""
     PEAR = re.compile(r"youtube-music|pear", re.I)    # Pear's MPRIS Identity is still com.github.th-ch.youtube-music
@@ -821,7 +909,7 @@ class Turns:
         for name, p, meta in players():
             if p.get("PlaybackStatus") != "Playing":
                 continue
-            if WATCH.match(meta.get("xesam:url", "")) or channel(meta.get("xesam:url", "")):
+            if WATCH.match(meta.get("xesam:url", "")) or channel(meta.get("xesam:url", "")) or tv_channel(meta.get("xesam:url", "")):
                 videos.append(name)
             elif self.is_pear(name):
                 pear.append(name)
@@ -852,7 +940,7 @@ class Turns:
                 self.was = (bool(pear or self.mpv.sounding()), True)
 
 
-MPV = RADIO = TUBE = PODS = TURNS = TWITCH = None    # set in main
+MPV = RADIO = TUBE = PODS = TURNS = TWITCH = TV = None    # set in main
 
 
 def now():
@@ -907,7 +995,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path not in ("/mpris.json", "/radio.json", "/youtube.json", "/youtube-home.json", "/youtube-open.json",
-                        "/podcast.json", "/podcast-episodes.json", "/now.json", "/twitch.json"):
+                        "/podcast.json", "/podcast-episodes.json", "/now.json", "/twitch.json", "/tv.json"):
             return super().do_GET()
         local = self.local()
         if local is None:
@@ -940,6 +1028,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(json.dumps(TUBE.wait_open(after)).encode(), local)
         if path == "/twitch.json":
             return self.send_json(json.dumps(TWITCH.live("fresh" in parse_qs(urlparse(self.path).query))).encode(), local)
+        if path == "/tv.json":
+            return self.send_json(json.dumps(TV.state()).encode(), local)
         if path == "/youtube-home.json":
             return self.send_json(json.dumps(TUBE.home("fresh" in parse_qs(urlparse(self.path).query))).encode(), local)
         global _cache
@@ -962,10 +1052,11 @@ class Handler(SimpleHTTPRequestHandler):
         /now, body {"toggle": true}.
         /twitch, body {"open": channel}; and from extras/firefox-pip, {"closed": channel}: its stream
         was closed (true: whatever was open is gone).
+        /tv, body {"open": channel id} | {"stop": true}.
         Only for the pages this server serves: a JSON body can't be sent cross-origin without a
         preflight, which nothing here answers, and an Origin that isn't ours is refused outright."""
         path = urlparse(self.path).path
-        if path not in ("/radio", "/youtube", "/podcast", "/now", "/twitch"):
+        if path not in ("/radio", "/youtube", "/podcast", "/now", "/twitch", "/tv"):
             return self.send_error(404)
         local = self.local()
         if local is None:
@@ -992,6 +1083,12 @@ class Handler(SimpleHTTPRequestHandler):
                 elif "open" in req and not TWITCH.open(req["open"]):
                     return self.send_error(404, "not a channel, or no browser to open it in")
                 return self.send_json(json.dumps(TUBE.state(fresh=True)).encode(), local)
+            if path == "/tv":
+                if req.get("stop"):
+                    TV.stop()
+                elif "open" in req and not TV.open(req["open"]):
+                    return self.send_error(404, "not a channel in tv.json, or no browser to open it in")
+                return self.send_json(json.dumps(TUBE.state(fresh=True)).encode(), local)
             if path == "/now":
                 if req.get("toggle"):
                     now_toggle()
@@ -1014,7 +1111,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json(json.dumps(RADIO.state()).encode(), local)
 
     def log_message(self, fmt, *args):
-        if not getattr(self, "path", "").startswith(("/mpris.json", "/radio", "/youtube", "/podcast", "/now", "/twitch")):    # unset on a malformed request
+        if not getattr(self, "path", "").startswith(("/mpris.json", "/radio", "/youtube", "/podcast", "/now", "/twitch", "/tv")):    # unset on a malformed request
             super().log_message(fmt, *args)
 
 
@@ -1036,6 +1133,10 @@ if __name__ == "__main__":
                     help="list the live channels you follow in the remote's Twitch tab, signed in as Chatterino is")
     ap.add_argument("--no-twitch-chat", action="store_true",
                     help="don't open Chatterino on the channel when a stream is opened from the Twitch tab")
+    ap.add_argument("--free-tv", action="store_true",
+                    help="the remote's TV tab: Free TV's channels (tv.free.fr), played in your browser")
+    ap.add_argument("--tv", default=Path(__file__).resolve().parent.parent / "tv.json",
+                    help="the channel list for the TV tab (default: tv.json next to the pages)")
     ap.add_argument("--let-both-play", action="store_true",
                     help="don't pause the browser's video or stream when music starts, nor the music when the video starts")
     a = ap.parse_args()
@@ -1049,13 +1150,14 @@ if __name__ == "__main__":
     PODS = Podcasts(MPV, a.podcasts, state)
     TUBE = Tube(a.youtube_cookies)
     TWITCH = Twitch(TUBE, a.twitch, chat=not a.no_twitch_chat)
+    TV = Tv(TUBE, a.tv, a.free_tv)
     if shutil.which("busctl"):
         TURNS = Turns(MPV, TUBE, act=not a.let_both_play)
         TURNS.start()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))    # so the finally below runs
     handler = functools.partial(Handler, directory=a.directory)
     with ThreadingHTTPServer((a.bind, a.port), handler) as httpd:
-        print(f"serving {a.directory} on http://{a.bind}:{a.port}/ (+ /mpris.json, /radio.json, /youtube.json, /podcast.json, /now.json, /twitch.json)")
+        print(f"serving {a.directory} on http://{a.bind}:{a.port}/ (+ /mpris.json, /radio.json, /youtube.json, /podcast.json, /now.json, /twitch.json, /tv.json)")
         try:
             httpd.serve_forever()
         finally:
